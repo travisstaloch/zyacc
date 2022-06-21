@@ -5,7 +5,7 @@ const Allocator = std.mem.Allocator;
 
 pub const Production = struct {
     name: []const u8 = &.{},
-    rule: Rule = .{},
+    rule: Rule,
     pub fn deinit(prod: Production, allocator: Allocator) void {
         prod.rule.root.deinit(allocator);
     }
@@ -53,22 +53,23 @@ pub const Symbol = union(enum) {
         _ = try writer.write(": ");
         const seq_separator = " ";
         const bracket_choices = false;
+        const bracket_literals = true;
         switch (s) {
             .name => |x| _ = try writer.write(x),
             .char_lit => |x| {
-                _ = try writer.writeByte('\'');
+                if (bracket_literals) _ = try writer.writeByte('\'');
                 _ = try writer.write(x);
-                _ = try writer.writeByte('\'');
+                if (bracket_literals) _ = try writer.writeByte('\'');
             },
             .str_lit => |x| {
-                _ = try writer.writeByte('"');
+                if (bracket_literals) _ = try writer.writeByte('"');
                 _ = try writer.write(x);
-                _ = try writer.writeByte('"');
+                if (bracket_literals) _ = try writer.writeByte('"');
             },
             .sqbkt_lit => |x| {
-                _ = try writer.writeByte('[');
+                if (bracket_literals) _ = try writer.writeByte('[');
                 _ = try writer.write(x);
-                _ = try writer.writeByte(']');
+                if (bracket_literals) _ = try writer.writeByte(']');
             },
             .optional => |x| {
                 try writer.print("{}", .{x});
@@ -167,8 +168,8 @@ pub const p = struct {
     pub const group_end = m.asStr(char(')'));
     pub const not = m.asStr(char('!'));
     pub const dot = m.asStr(char('.'));
-    pub const sqbkt_l = m.asStr(char('['));
-    pub const sqbkt_r = m.asStr(char(']'));
+    pub const sqbkt_l = m.ascii.char('[');
+    pub const sqbkt_r = m.ascii.char(']');
 
     pub const escaped_char_lit = m.convert(u8, convEscapeCharLit, m.combine(.{ char('\\'), m.oneOf(.{ char('\''), char('n'), char('\\') }) }));
     pub const many_not_quote = m.many(m.oneOf(.{ escaped_char_lit, m.ascii.not(quote) }), .{ .collect = false, .min = 1 });
@@ -177,7 +178,7 @@ pub const p = struct {
     pub const many_not_dquote = m.many(m.oneOf(.{ escaped_str, m.ascii.not(dquote) }), .{ .collect = false, .min = 1 });
     pub const str_lit = m.combine(.{ dquote, many_not_dquote, dquote });
     pub const many_not_sqbkt_r = m.many(m.ascii.not(sqbkt_r), .{ .collect = false, .min = 1 });
-    pub const sqbkt_lit = m.asStr(m.combine(.{ sqbkt_l, many_not_sqbkt_r, sqbkt_r }));
+    pub const sqbkt_lit = m.combine(.{ sqbkt_l, many_not_sqbkt_r, sqbkt_r });
 
     fn convEscapeCharLit(_: Allocator, res: [2]u8) !u8 {
         return switch (res[1]) {
