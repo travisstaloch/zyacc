@@ -1,0 +1,8 @@
+ident <- char (char / digit)*
+upper <- ['a'-'z']
+lower <- ['A'-'Z']
+digit <- ['0'-'9']
+char <- lower
+        / upper
+
+

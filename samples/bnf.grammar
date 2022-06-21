@@ -1,0 +1,40 @@
+# BNF Grammar
+# S: Symbol
+# D: Definition
+# L: Line
+# Seq: Sequence
+# lf: linefeed
+
+S   <- D / S1
+S1  <- lf S
+D   <- Id "<-" Choice L
+
+L   <- L2 / Empty
+L2  <- lf L3
+L3  <- L / D
+
+Choice   <- Seq Choice1
+Choice1  <- Empty / Choice1a
+Choice1a <- "/" Choice
+
+Seq   <- Seq1 Seq2
+Seq1  <- Id / QuotedStringToken
+Seq2  <- Empty / Seq
+
+
+# Original from https://www.clear.rice.edu/comp405/s16/lectures/parsing/parse_bnf.html
+# S   ::= D | S1
+# S1  ::= lf S
+# D   ::= Id "::=" E L
+#  
+# L   ::= L2 | Empty
+# L2  ::= lf  L3
+# L3  ::= L | D
+#  
+# E   ::= T E1
+# E1  ::= Empty | E1a
+# E1a ::= "|" E
+#  
+# T   ::= T1 T2
+# T1  ::= Id | QuotedStringToken
+# T2  ::= Empty | T
