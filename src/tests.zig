@@ -125,3 +125,31 @@ test "literal escapes" {
         try t.expect(prods[0].rule.root.choice[0].some.group[1].char_lit.len == 2);
     }
 }
+
+test "calc" {
+    {
+        const src = @embedFile("../samples/calc.bnf");
+        var prods = try bnf.parse(t.allocator, t.failing_allocator, src);
+        defer bnf.parseFree(t.allocator, prods);
+        for (prods) |p|
+            std.debug.print("{s} <- {}\n", .{ p.name, p.rule.root });
+
+        const input =
+            \\ 1 + 2 * 3 ^ 2
+        ;
+        try bnf.parseWith(t.allocator, t.failing_allocator, prods, input);
+    }
+}
+
+test "xz" {
+    {
+        const src = @embedFile("../samples/xz.bnf");
+        var prods = try bnf.parse(t.allocator, t.failing_allocator, src);
+        defer bnf.parseFree(t.allocator, prods);
+        for (prods) |p|
+            std.debug.print("{s} <- {}\n", .{ p.name, p.rule.root });
+
+        const tables = try bnf.createTables(t.allocator, prods);
+        _ = tables;
+    }
+}

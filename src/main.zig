@@ -1,7 +1,8 @@
 const std = @import("std");
 const m = @import("mecha");
 const assert = std.debug.assert;
-const Allocator = std.mem.Allocator;
+const mem = std.mem;
+const Allocator = mem.Allocator;
 
 pub const Production = struct {
     name: []const u8 = &.{},
@@ -20,14 +21,14 @@ pub const Symbol = union(enum) {
     char_lit: []const u8,
     str_lit: []const u8,
     sqbkt_lit: []const u8,
-    // _terminal,
+    _terminal,
     name: []const u8,
 
     optional: *const Symbol,
     some: *const Symbol,
     many: *const Symbol,
     not: *const Symbol,
-    // _operator,
+    _operator,
     choice: []const Symbol,
     seq: []const Symbol,
     group: []const Symbol,
@@ -36,7 +37,7 @@ pub const Symbol = union(enum) {
 
     pub fn deinit(sym: Symbol, allocator: Allocator) void {
         switch (sym) {
-            .name, .char_lit, .str_lit, .sqbkt_lit, .dot, .group_end, .comment => {},
+            .name, .char_lit, .str_lit, .sqbkt_lit, .dot, .group_end, .comment, ._operator, ._terminal => {},
             .optional, .some, .many, .not => |child| {
                 child.deinit(allocator);
                 allocator.destroy(child);
@@ -49,11 +50,12 @@ pub const Symbol = union(enum) {
     }
 
     pub fn format(s: Symbol, comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
-        _ = try writer.write(@tagName(s));
-        _ = try writer.write(": ");
         const seq_separator = " ";
         const bracket_choices = false;
         const bracket_literals = true;
+        const show_tag = false;
+        if (show_tag) _ = try writer.write(@tagName(s));
+        if (show_tag) _ = try writer.write(": ");
         switch (s) {
             .name => |x| _ = try writer.write(x),
             .char_lit => |x| {
@@ -116,11 +118,13 @@ pub const Symbol = union(enum) {
             .group_end => unreachable,
             // .newline => _ = try writer.writeByte('\n'),
             .comment => unreachable,
+            ._operator => unreachable,
+            ._terminal => unreachable,
         }
     }
 };
 
-// const showtrace = true;
+const showtrace = true;
 fn trace(comptime fmt: []const u8, args: anytype) void {
     // @compileLog(comptime std.fmt.comptimePrint(fmt, args));
     // @compileError(comptime std.fmt.comptimePrint(fmt, args));
@@ -142,6 +146,7 @@ pub const p = struct {
     pub const alphanum = m.oneOf(.{ char('_'), m.ascii.alphanum });
     pub const manyalphanum = m.many(alphanum, .{ .collect = false });
     pub const ws = m.discard(m.many(m.ascii.space, .{ .collect = false }));
+    pub const somenonws = m.discard(m.many(m.ascii.not(m.ascii.space), .{ .collect = false, .min = 1 }));
     // pub const manyspacenotnl = m.many(m.oneOf(.{
     //     char(' '),
     //     char('\r'),
@@ -219,9 +224,12 @@ fn copy(a: Allocator, sym: Symbol) !*Symbol {
 //     };
 // }
 
-// fn isTerminal(sym: Symbol) bool {
-//     return !isOperator(sym);
-// }
+fn isTerminal(sym: Symbol) bool {
+    return switch (sym) {
+        .many, .some, .optional, .not => |x| isTerminal(x.*),
+        else => @enumToInt(sym) < @enumToInt(@as(Symbol, ._terminal)),
+    };
+}
 // fn isOperator(sym: Symbol.Tag) bool {
 //     return @enumToInt(sym) > @enumToInt(@as(Symbol, ._operator));
 // }
@@ -387,7 +395,7 @@ fn seqUntil(ctx: *Context, terminators: []const Symbol.Tag) Error!?std.ArrayList
     var seq = std.ArrayListUnmanaged(Symbol){};
     while (nextSym(ctx)) |sym| {
         trace("seqUntil {s}:{s}\n", .{ @tagName(sym.tag), sym.str });
-        if (std.mem.indexOfScalar(Symbol.Tag, terminators, sym.tag) != null) {
+        if (mem.indexOfScalar(Symbol.Tag, terminators, sym.tag) != null) {
             ctx.pending_sym = sym;
             break;
         }
@@ -441,7 +449,7 @@ pub fn parse(allr: Allocator, fallr: Allocator, src: []const u8) ![]const Produc
     trace("\nparse()\n", .{});
     while (ctx.rest.len > 0) {
         if (ctx.rest[0] == '#') {
-            if (std.mem.indexOfScalar(u8, ctx.rest, '\n')) |nlidx|
+            if (mem.indexOfScalar(u8, ctx.rest, '\n')) |nlidx|
                 ctx.rest = ctx.rest[nlidx + 1 ..];
         }
         // trace("rest '{s}'\n", .{rest[0..20]});
@@ -450,11 +458,11 @@ pub fn parse(allr: Allocator, fallr: Allocator, src: []const u8) ![]const Produc
             @panic("Parse failure");
         };
         ctx.rest = ctx.rest[ctx.rest.len - nameres.rest.len ..];
-        const name = std.mem.trim(u8, nameres.value, &std.ascii.spaces);
-        const nextarrowidx = std.mem.indexOf(u8, ctx.rest, "<-") orelse {
+        const name = mem.trim(u8, nameres.value, &std.ascii.spaces);
+        const nextarrowidx = mem.indexOf(u8, ctx.rest, "<-") orelse {
             const rest = ctx.rest;
             defer ctx.rest = rest;
-            ctx.rest = std.mem.trim(u8, ctx.rest, &std.ascii.spaces);
+            ctx.rest = mem.trim(u8, ctx.rest, &std.ascii.spaces);
             trace("rule '{s}'\n", .{name});
             try prods.append(.{ .name = name, .rule = try parseRule(&ctx) });
             break;
@@ -462,7 +470,7 @@ pub fn parse(allr: Allocator, fallr: Allocator, src: []const u8) ![]const Produc
         // trace("name '{s}' nextarrowidx {}\n", .{ name, nextarrowidx });
         var endruleidx = nextarrowidx;
         while (true) {
-            endruleidx = std.mem.lastIndexOfScalar(u8, ctx.rest[0..endruleidx], '\n') orelse break;
+            endruleidx = mem.lastIndexOfScalar(u8, ctx.rest[0..endruleidx], '\n') orelse break;
             const identres = p.ident(ctx.fallr, ctx.rest[endruleidx + 1 ..]) catch {
                 // trace("ident() fail '{s}'\n", .{rest[endruleidx..][0..10]});
                 // const s = ctx.rest[endruleidx + 1 ..];
@@ -474,12 +482,331 @@ pub fn parse(allr: Allocator, fallr: Allocator, src: []const u8) ![]const Produc
             _ = identres;
             const rest = ctx.rest;
             defer ctx.rest = rest;
-            ctx.rest = std.mem.trim(u8, ctx.rest[0..endruleidx], &std.ascii.spaces);
+            ctx.rest = mem.trim(u8, ctx.rest[0..endruleidx], &std.ascii.spaces);
             trace("rule '{s}'\n", .{name});
             try prods.append(.{ .name = name, .rule = try parseRule(&ctx) });
             break;
         }
-        ctx.rest = std.mem.trimLeft(u8, ctx.rest[endruleidx..], &std.ascii.spaces);
+        ctx.rest = mem.trimLeft(u8, ctx.rest[endruleidx..], &std.ascii.spaces);
     }
     return prods.toOwnedSlice();
+}
+
+const MatchError = error{ Todo, UnescapedDash };
+pub fn matchLit(lit: Symbol, token: []const u8) MatchError!usize {
+    return switch (lit) {
+        .sqbkt_lit => blk: {
+            var rest = token;
+            var restlit = lit.sqbkt_lit;
+            // var matchlen: usize = 0;
+            var match = true;
+            while (rest.len > 0 and restlit.len > 0 and match) {
+                match = false;
+                const c = rest[0];
+                std.debug.print("sqbkt_lit c '{c}' restlit[0] '{c}'\n", .{ c, restlit[0] });
+                if (restlit.len > 1) {
+                    const next = restlit[1];
+                    if (next == '-') {
+                        if (restlit.len > 2) {
+                            const start = restlit[0];
+                            const end = restlit[2];
+                            assert(end >= start);
+                            match = c -% start <= (end - start);
+                            restlit = restlit[3 * @as(u2, @boolToInt(match)) ..];
+                        } else {
+                            // unescaped '-'
+                            return error.UnescapedDash;
+                        }
+                    } else {
+                        match = c == restlit[0];
+                        restlit = restlit[@boolToInt(match)..];
+                    }
+                }
+
+                std.debug.print("  match {}\n", .{match});
+                rest = rest[@boolToInt(match)..];
+            }
+            break :blk token.len - rest.len;
+        },
+        .char_lit => @boolToInt(token.len == 1 and token[0] == lit.char_lit[0]) * token.len,
+        .str_lit => @boolToInt(mem.eql(u8, lit.str_lit, token)) * token.len,
+        .some => {
+            const len = try matchLit(lit.some.*, token);
+            return len * @boolToInt(len > 0);
+        },
+        else => error.Todo,
+    };
+}
+
+pub fn parseWith(allocator: Allocator, fallr: Allocator, prods: []const Production, input: []const u8) !void {
+    var terminals = std.StringHashMap(Rule).init(allocator);
+    var nonterminals = std.StringHashMap(Rule).init(allocator);
+    defer {
+        terminals.deinit();
+        nonterminals.deinit();
+    }
+    for (prods) |prod| {
+        if (prod.rule.root.choice.len == 1) {
+            const firstchoice = prod.rule.root.choice[0];
+            std.debug.print("firstchoice {}\n", .{firstchoice});
+            if (isTerminal(firstchoice)) {
+                try terminals.put(prod.name, prod.rule);
+                continue;
+            }
+        }
+        try nonterminals.put(prod.name, prod.rule);
+    }
+    var rest = input;
+    var stack = std.ArrayListUnmanaged([]const u8){};
+    if (p.ws(fallr, rest)) |r| rest = r.rest else |_| {}
+    while (rest.len > 0) {
+        if (m.combine(.{ comptime m.asStr(p.somenonws), p.ws })(fallr, rest)) |r| {
+            rest = r.rest;
+            std.debug.print("token '{s}'\n", .{r.value});
+            var termsit = terminals.iterator();
+            const matchedname = while (termsit.next()) |ent| {
+                const matchlen = try matchLit(ent.value_ptr.*.root.choice[0], r.value);
+                std.debug.print("checking {s} matchlen {}\n", .{ ent.key_ptr.*, matchlen });
+                if (matchlen == r.value.len) {
+                    std.debug.print("matched {} chars with {s} \n", .{ matchlen, ent.key_ptr.* });
+                    break ent.key_ptr.*;
+                }
+            } else null;
+            if (matchedname) |name| {
+                // std.debug.print("matchedname {s}\n", .{k});
+                stack.append(name);
+            } else break;
+        } else |_| {}
+    }
+
+    // {
+    //     var it = terminals.iterator();
+    //     std.debug.print("terminals \n", .{});
+    //     while (it.next()) |ent| {
+    //         std.debug.print("  {s}\n", .{ent.key_ptr.*});
+    //     }
+    // }
+    // {
+    //     var it = nonterminals.iterator();
+    //     std.debug.print("nonterminals \n", .{});
+    //     while (it.next()) |ent| {
+    //         std.debug.print("  {s}\n", .{ent.key_ptr.*});
+    //     }
+    // }
+}
+
+// pub fn Tables(comptime NTerminals: u16, comptime NSymbols: u16, comptime NStates: u16) type {
+//     return struct {
+//         action: [NTerminals + 1][NStates]ShiftReduce(u8) = undefined,
+//         goto: [NSymbols][NStates]I = undefined,
+//         pub const I = std.meta.Int(.unsigned, std.math.log2_int_ceil(NStates));
+//     };
+// }
+
+pub fn ShiftReduce(comptime I: type) type {
+    return union(enum) {
+        shift,
+        reduce: I,
+    };
+}
+
+fn populateIdTables(termids: *SymbolIdMap, nontermids: *SymbolIdMap, sym: Symbol) Error!void {
+    trace("populateIdTables {}\n", .{sym});
+    switch (sym) {
+        .char_lit, .str_lit, .sqbkt_lit => |s| try termids.put(s, @intCast(u16, termids.count())),
+        .name => |s| try nontermids.put(s, @intCast(u16, nontermids.count())),
+        .optional, .some, .many, .not => |s| {
+            try populateIdTables(termids, nontermids, s.*);
+        },
+        .choice, .seq, .group => |ss| for (ss) |s| {
+            try populateIdTables(termids, nontermids, s);
+        },
+        else => unreachable,
+    }
+}
+
+fn nameId(name: []const u8, terminal_ids: SymbolIdMap, nonterminal_ids: SymbolIdMap, terminalscount: SymbolId) SymbolId {
+    return terminal_ids.get(name) orelse
+        ((nonterminal_ids.get(name) orelse unreachable) + terminalscount);
+}
+
+fn idName(id: SymbolId, terminal_ids: SymbolIdMap, nonterminal_ids: SymbolIdMap, terminalscount: SymbolId) ?SymbolId {
+    {
+        var it = terminal_ids.iterator();
+        while (it.next()) |ent| : (id += 1) {
+            if (id == ent.value_ptr.*) return ent.key_ptr.*;
+        }
+    }
+    {
+        var it = nonterminal_ids.iterator();
+        while (it.next()) |ent| : (id += 1) {
+            if (id == ent.value_ptr.* + terminalscount) return ent.key_ptr.*;
+        }
+    }
+    return null;
+}
+
+const SymbolId = u16;
+const SymbolIdMap = std.StringArrayHashMap(SymbolId);
+const StateId = u8;
+const ColRow = std.meta.Tuple(&.{ SymbolId, StateId });
+
+const ProdMap = std.StringHashMap(Production);
+const ActionTable = std.AutoArrayHashMapUnmanaged(ColRow, ShiftReduce(StateId));
+const GotoTable = std.AutoArrayHashMapUnmanaged(ColRow, StateId);
+const Tables = struct { action: ActionTable, goto: GotoTable };
+const start_symname = "S'";
+pub fn createTables(allocator: Allocator, prods: []const Production) !Tables {
+    // based on https://pages.github-dev.cs.illinois.edu/cs421-sp20/web/handouts/lr-parsing-tables.pdf
+    var prodmap = ProdMap.init(allocator);
+    var terminal_ids = SymbolIdMap.init(allocator);
+    var nonterminal_ids = SymbolIdMap.init(allocator);
+    defer {
+        prodmap.deinit();
+        terminal_ids.deinit();
+        nonterminal_ids.deinit();
+    }
+    // populate terminal/nonterminal_ids tables
+    for (prods) |prod| {
+        try prodmap.put(prod.name, prod);
+        if (prod.rule.root.choice.len == 1) {
+            const firstchoice = prod.rule.root.choice[0];
+            trace("firstchoice {}\n", .{firstchoice});
+            if (isTerminal(firstchoice)) {
+                try terminal_ids.put(prod.name, @intCast(u16, terminal_ids.count()));
+                continue;
+            }
+        }
+        if (!mem.eql(u8, prod.name, start_symname))
+            try nonterminal_ids.put(prod.name, @intCast(u16, nonterminal_ids.count()));
+        try populateIdTables(&terminal_ids, &nonterminal_ids, prod.rule.root);
+    }
+    const terminalscount = @intCast(SymbolId, terminal_ids.count());
+    const nonterminalscount = @intCast(SymbolId, nonterminal_ids.count());
+
+    trace("terminal_ids.count() {}\n", .{terminalscount});
+    trace("nonterminal_ids.count() {}\n", .{nonterminalscount});
+
+    var actiontable = ActionTable{};
+    var gototable = GotoTable{};
+    defer {
+        actiontable.deinit(allocator);
+        gototable.deinit(allocator);
+    }
+    var stateid: StateId = 1;
+
+    // state 0: insert initial states (row 0) into goto table
+    const start_firstname = try getFirstNameOf(allocator, prodmap.get(start_symname).?);
+    const start_firstid = nameId(start_firstname, terminal_ids, nonterminal_ids, terminalscount);
+    trace("start_firstname '{s}':{}\n", .{ start_firstname, start_firstid });
+    try gototable.put(allocator, .{ start_firstid, 0 }, stateid);
+    displayTable("goto", gototable);
+    stateid += 1;
+    const closure = try getClosure(allocator, start_symname, prodmap);
+    defer allocator.free(closure);
+    trace("closure.len {}\n", .{closure.len});
+
+    for (closure[1..]) |cl| {
+        var pos: u8 = 0;
+        var names = std.StringHashMap(void).init(allocator);
+        defer names.deinit();
+        try getNamesAtPosition(0, cl.rule.root, &names, &pos, null);
+        trace("cl {s} names.count {} at pos 0\n", .{ cl.name, names.count() });
+        var it = names.iterator();
+        while (it.next()) |ent| {
+            const id = nameId(ent.key_ptr.*, terminal_ids, nonterminal_ids, terminalscount);
+            const gop = try gototable.getOrPut(allocator, .{ id, 0 });
+            if (!gop.found_existing) {
+                trace("  adding state {} name {s}:{}\n", .{ stateid, ent.key_ptr.*, id });
+                gop.value_ptr.* = stateid;
+                stateid += 1;
+            }
+        }
+    }
+    displayTable("goto", gototable);
+
+    // move the dotpos cursor through each position for each production
+    // and check for names at that position.
+    // if found, insert ((col, row), stateid) entries into the tables
+    var dotpos: StateId = 0;
+    stateid = 1;
+    outer: while (true) : (dotpos += 1) {
+        for (prods) |prod| {
+            var names = std.StringHashMap(void).init(allocator);
+            defer names.deinit();
+            var pos: StateId = 0;
+            var maxpos: StateId = 0;
+            try getNamesAtPosition(dotpos, prod.rule.root, &names, &pos, &maxpos);
+            if (dotpos == maxpos) {
+                trace("{s}: atmaxpos {}\n", .{ prod.name, maxpos });
+            }
+            var it = names.iterator();
+            while (it.next()) |ent| {
+                const name = ent.key_ptr.*;
+                const id = nameId(name, terminal_ids, nonterminal_ids, terminalscount);
+                trace("{s}:{} dotpos/maxpos {}/{} names {s}\n", .{ prod.name, id, dotpos, maxpos, name });
+            }
+        }
+        if (dotpos == 4) break :outer;
+    }
+
+    return Tables{ .action = actiontable, .goto = gototable };
+}
+
+fn displayTable(tablename: []const u8, table: anytype) void {
+    var it = table.iterator();
+    while (it.next()) |ent|
+        trace("{s} table entry: {}={}\n", .{ tablename, ent.key_ptr.*, ent.value_ptr.* });
+}
+
+fn getClosure(allocator: Allocator, _name: []const u8, prodmap: ProdMap) Error![]const Production {
+    var stack = std.ArrayList([]const u8).init(allocator);
+    defer stack.deinit();
+    try stack.append(_name);
+
+    var result = std.ArrayList(Production).init(allocator);
+    while (stack.popOrNull()) |name| {
+        if (prodmap.get(name)) |prod| {
+            const found = for (result.items) |it| {
+                if (mem.eql(u8, it.name, prod.name)) break true;
+            } else false;
+            if (found) continue;
+            try result.append(prod);
+            var names = std.StringHashMap(void).init(allocator);
+            defer names.deinit();
+            var pos: u8 = 0;
+            try getNamesAtPosition(0, prod.rule.root, &names, &pos, null);
+            var it = names.iterator();
+            while (it.next()) |ent| try stack.append(ent.key_ptr.*);
+        }
+    }
+    return result.toOwnedSlice();
+}
+
+fn getNamesAtPosition(dotpos: u8, sym: Symbol, names: *std.StringHashMap(void), pos: *u8, mmaxpos: ?*u8) Error!void {
+    if (mmaxpos) |maxpos| maxpos.* = std.math.max(maxpos.*, pos.*);
+    switch (sym) {
+        .char_lit, .str_lit, .sqbkt_lit, .name => |s| if (pos.* == dotpos) try names.put(s, {}),
+        .optional, .some, .many, .not => |s| {
+            try getNamesAtPosition(dotpos, s.*, names, pos, mmaxpos);
+        },
+        .seq, .group => |ss| for (ss) |s, i| {
+            var pos2 = pos.* + @intCast(u8, i);
+            try getNamesAtPosition(dotpos, s, names, &pos2, mmaxpos);
+        },
+        .choice => |ss| for (ss) |s| {
+            try getNamesAtPosition(dotpos, s, names, pos, mmaxpos);
+        },
+        else => unreachable,
+    }
+}
+
+fn getFirstNameOf(allocator: Allocator, prod: Production) ![]const u8 {
+    var names = std.StringHashMap(void).init(allocator);
+    defer names.deinit();
+    var pos: u8 = 0;
+    try getNamesAtPosition(0, prod.rule.root, &names, &pos, null);
+    trace("getFirstNameOf {s} names.count() {}\n", .{ prod.name, names.count() });
+    var it = names.iterator();
+    return if (names.count() == 1) it.next().?.key_ptr.* else error.NamesCountNotEqOne;
 }

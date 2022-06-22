@@ -15,9 +15,9 @@ pub fn build(b: *std.build.Builder) void {
     pkgs.addAllTo(main_tests);
     main_tests.setBuildMode(mode);
 
-    // const filter = "keyword";
+    const filter = "xz";
     // const filter = "TopLevelDecl";
-    // main_tests.filter = filter;
+    main_tests.filter = filter;
 
     const test_step = b.step("test", "Run library tests");
     test_step.dependOn(&main_tests.step);

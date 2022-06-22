@@ -1,0 +1,8 @@
+Expression <- Term            #action => ::first
+Term <- Factor                #action => ::first
+       / Term '+' Term        #action => do_add
+Factor <- Number              #action => ::first
+         / Factor '*' Factor  #action => do_multiply
+
+Number <- [0-9]+
+whitespace <- [ \n]+
