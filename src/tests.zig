@@ -303,7 +303,7 @@ test "lr0items" {
 }
 
 test "createTables" {
-    const src = @embedFile("../samples/factor.bnf");
+    const src = @embedFile("../samples/cd.bnf");
     var prods = try bnf.parseGrammar(allr, t.failing_allocator, src);
 
     var ginfo = try bnf.GrammarInfo.init(allr, prods);
@@ -312,35 +312,101 @@ test "createTables" {
         bnf.parseFree(allr, prods);
         ginfo.deinit(allr);
     }
-    var tables = try bnf.createTables(allr, ginfo, "E' <- E");
+    var tables = try bnf.createTables(allr, ginfo, "S' <- S");
     var writer = std.io.getStdErr().writer();
 
     {
         std.debug.print("symbols\n", .{});
         for (ginfo.name_sym.keys()) |name| {
-            std.debug.print("{s}-{}\n", .{ name, bnf.TidFmt.init(ginfo.nameToTid(name).?, ginfo) });
+            const tid = ginfo.nameToTid(name).?;
+            std.debug.print("{}-{}\n", .{ bnf.TidFmt.init(tid, ginfo), tid.id });
         }
     }
     {
         std.debug.print("actions\n", .{});
-        var it = tables.action.iterator();
+        var it = tables.actions.iterator();
         while (it.next()) |ent| {
             const rc = ent.key_ptr.*;
-            std.debug.print("({},{})-{}\n", .{ bnf.TypedColRow.Fmt.init(rc, tables.ginfo), rc.row, ent.value_ptr.* });
+            std.debug.print("{}-{}\n", .{ bnf.SLRTables.Entry.Fmt.init(rc, tables.ginfo), ent.value_ptr.* });
         }
     }
     {
         std.debug.print("gotos\n", .{});
-        var it = tables.goto.iterator();
+        var it = tables.gotos.iterator();
         while (it.next()) |ent| {
             const rc = ent.key_ptr.*;
-            std.debug.print("({},{})-{}\n", .{ bnf.TypedColRow.Fmt.init(rc, tables.ginfo), rc.row, ent.value_ptr.* });
+            std.debug.print("{}-{}\n", .{ bnf.SLRTables.Entry.Fmt.init(rc, tables.ginfo), ent.value_ptr.* });
         }
     }
     try tables.display(writer, 7);
 
     defer {
         tables.deinit(allr);
+    }
+    // const Stid = ginfo.nameToTid("S").?;
+    // const Ctid = ginfo.nameToTid("C").?;
+    // const ctid = ginfo.nameToTid("c").?;
+    // const dtid = ginfo.nameToTid("d").?;
+
+    // const gS0 = tables.gotos.get(.{ .col = Stid, .row = 0 });
+    // try t.expect(gS0 != null);
+    // try t.expectEqual(@as(bnf.SymbolId, 1), gS0.?);
+
+    // const gC0 = tables.gotos.get(.{ .col = Ctid, .row = 0 });
+    // try t.expect(gC0 != null);
+    // try t.expectEqual(@as(bnf.SymbolId, 2), gC0.?);
+
+    // const ac0 = tables.actions.get(.{ .col = ctid, .row = 0 });
+    // try t.expect(ac0 != null);
+    // try t.expectEqual(bnf.Action{ .shift = 3 }, ac0.?);
+
+    // const ad0 = tables.actions.get(.{ .col = dtid, .row = 0 });
+    // try t.expect(ad0 != null);
+    // try t.expectEqual(bnf.Action{ .shift = 4 }, ad0.?);
+
+    // const a_1 = tables.actions.get(.{ .col = .{ .id = ginfo.terminalscount, .ty = .term }, .row = 1 });
+    // try t.expect(a_1 != null);
+    // try t.expectEqual(bnf.Action{ .reduce = 2 }, a_1.?); // FIXME: 2 is incorrect
+
+    // const gC2 = tables.gotos.get(.{ .col = Ctid, .row = 2 });
+    // try t.expect(gC2 != null);
+    // try t.expectEqual(@as(bnf.SymbolId, 5), gC2.?);
+
+    // const ac2 = tables.actions.get(.{ .col = ctid, .row = 2 });
+    // try t.expect(ac2 != null);
+    // try t.expectEqual(bnf.Action{ .shift = 6 }, ac2.?);
+    const src2 =
+        \\S -> C C .
+        \\C -> c C | d .
+    ;
+    _ = src2;
+    // TODO: parse this structure
+    // TODO: change this structure to use entries rather than csv
+    //       so each entry would be an index data pair
+    //       this will prevent errors related to forgetting/adding extra comma
+    const rows =
+        \\s3, s4, 1, 2
+        \\a, a, ,
+        \\s3, s4, , 5
+        \\s3, s4, , 6
+        // FIXME: need to either break all productions for each choice so that they can be numbered
+        //        or represent reductions as [(prodid, choiceid, choicenum)]
+        \\rCd, rCd, ,
+        \\rS, rS, ,
+        \\rCc, rCc, ,
+    ;
+    _ = rows;
+    var tblexpected: bnf.SLRTables = .{ .ginfo = ginfo };
+    _ = tblexpected;
+    var linesit = std.mem.split(u8, rows, "\n");
+    while (linesit.next()) |line| {
+        var it = std.mem.split(u8, line, ",");
+        var col: u8 = 0;
+        while (it.next()) |ent| : (col += 1) {
+            const trimmedent = std.mem.trim(u8, ent, &std.ascii.spaces);
+            std.debug.print("'{s}',", .{trimmedent});
+        }
+        std.debug.print("\n", .{});
     }
 }
 

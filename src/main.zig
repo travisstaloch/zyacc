@@ -141,6 +141,10 @@ fn trace(comptime fmt: []const u8, args: anytype) void {
         std.debug.print(fmt, args);
 }
 
+fn todo() noreturn {
+    @panic("TODO");
+}
+
 pub const p = struct {
     pub fn char(comptime c: u8) m.Parser(u8) {
         const Res = m.Result(u8);
@@ -620,7 +624,7 @@ pub fn parseLR(allocator: Allocator, fallr: Allocator, ginfo: GrammarInfo, input
     var symbolid: SymbolId = 0;
     while (rest.len > 0 and stack.items.len > 0) {
         const stateid = stack.items[stack.items.len - 1];
-        const action = tables.action.get(.{ symbolid, stateid }) orelse unreachable;
+        const action = tables.actions.get(.{ symbolid, stateid }) orelse unreachable;
         switch (action) {
             // shift next state onto stack
             .shift => {
@@ -957,7 +961,10 @@ pub const TidFmt = struct {
     }
     pub fn format(self: TidFmt, comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
         // try writer.print("{s}:{}, ", .{ self.ginfo.idToName(self.tid), self.tid.id });
-        try writer.print("{s}", .{self.ginfo.idToName(self.tid)});
+        if (self.tid.ty == .term)
+            try writer.print("'{s}'", .{self.ginfo.idToName(self.tid)})
+        else
+            try writer.print("{s}", .{self.ginfo.idToName(self.tid)});
     }
 };
 
@@ -1089,73 +1096,87 @@ pub const ColRow = struct {
     }
 };
 
-pub const TypedColRow = struct {
-    col: TypedSymbolId,
-    row: SymbolId = 0,
+pub const SLRTables = struct {
+    actions: Actions = .{},
+    gotos: Gotos = .{},
+    actionrows: u16 = 0,
+    gotorows: u16 = 0,
+    ginfo: GrammarInfo,
 
-    pub const Fmt = struct {
-        tcr: TypedColRow,
-        ginfo: GrammarInfo,
-        pub fn init(tcr: TypedColRow, ginfo: GrammarInfo) Fmt {
-            return .{
-                .tcr = tcr,
-                .ginfo = ginfo,
-            };
-        }
-        pub fn format(self: @This(), comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
-            try writer.print("{}:{}", .{ TidFmt.init(self.tcr.col, self.ginfo), self.tcr.row });
-        }
+    pub const Entry = struct {
+        col: TypedSymbolId,
+        row: StateId,
+
+        pub const Fmt = struct {
+            entry: Entry,
+            ginfo: GrammarInfo,
+            pub fn init(entry: Entry, ginfo: GrammarInfo) Fmt {
+                return .{
+                    .entry = entry,
+                    .ginfo = ginfo,
+                };
+            }
+            pub fn format(self: @This(), comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
+                try writer.print("{}:({}-{s},{})", .{ TidFmt.init(self.entry.col, self.ginfo), self.entry.col.id, @tagName(self.entry.col.ty), self.entry.row });
+            }
+        };
     };
-};
 
-pub fn Action(comptime I: type) type {
-    return union(enum) {
-        shift,
-        reduce: I,
+    pub const Action = union(enum) {
+        shift: SymbolId,
+        // FIXME: this needs to be able to store a production, choice pair
+        // or else productions need to be duplicated for each choice so that
+        // A <- B / C
+        // becomes
+        // A <- B
+        // A <- C
+        reduce: SymbolId,
         accept,
-        pub fn format(self: @This(), comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
+
+        pub const ProductionChoice = struct {
+            prodid: SymbolId,
+            choiceid: SymbolId,
+        };
+        pub fn format(self: @This(), comptime fmt: []const u8, opts: std.fmt.FormatOptions, writer: anytype) !void {
+            // std.debug.print("---fmt {s} opts {}", .{ fmt, opts });
+            _ = fmt;
+            _ = opts;
             switch (self) {
-                .shift => _ = try writer.write("s"),
-                .reduce => |r| _ = try writer.print("r{}", .{r}),
+                .shift => |s| _ = try writer.print("s{}" ++ fmt, .{s}),
+                .reduce => |r| _ = try writer.print("r{}" ++ fmt, .{r}),
                 .accept => _ = try writer.write("$"),
             }
         }
     };
-}
-pub const ActionTable = std.AutoArrayHashMapUnmanaged(TypedColRow, Action(StateId));
-pub const GotoTable = std.AutoArrayHashMapUnmanaged(TypedColRow, StateId);
-pub const Tables = struct {
-    action: ActionTable = .{},
-    goto: GotoTable = .{},
-    actionrows: u16 = 0,
-    gotorows: u16 = 0,
-    ginfo: GrammarInfo,
+
+    pub const Actions = std.AutoArrayHashMapUnmanaged(Entry, Action);
+    pub const Gotos = std.AutoArrayHashMapUnmanaged(Entry, SymbolId);
     pub const Type = enum { action, goto };
-    pub fn deinit(self: *Tables, allocator: Allocator) void {
-        self.action.deinit(allocator);
-        self.goto.deinit(allocator);
+    pub fn deinit(self: *SLRTables, allocator: Allocator) void {
+        self.actions.deinit(allocator);
+        self.gotos.deinit(allocator);
         self.ginfo.deinit(allocator);
     }
 
-    pub fn putNoClobber(self: *Tables, allocator: Allocator, comptime ty: Type, colrow: TypedColRow, value: anytype) !void {
+    pub fn putNoClobber(self: *SLRTables, allocator: Allocator, comptime ty: Type, entry: Entry, value: anytype) !void {
         switch (ty) {
             .action => {
-                const gop = try self.action.getOrPut(allocator, colrow);
+                const gop = try self.actions.getOrPut(allocator, entry);
                 // TODO: handle existing
                 if (gop.found_existing)
                     std.debug.print("  found existing\n", .{});
                 // if (gop.found_existing) return error.FoundExisting;
                 gop.value_ptr.* = value;
-                self.actionrows = std.math.max(self.actionrows, colrow.row);
+                self.actionrows = std.math.max(self.actionrows, entry.row);
             },
             .goto => {
-                const gop = try self.goto.getOrPut(allocator, colrow);
+                const gop = try self.gotos.getOrPut(allocator, entry);
                 // TODO: handle existing
                 if (gop.found_existing)
                     std.debug.print("  found existing\n", .{});
                 // if (gop.found_existing) return error.FoundExisting;
                 gop.value_ptr.* = value;
-                self.gotorows = std.math.max(self.gotorows, colrow.row);
+                self.gotorows = std.math.max(self.gotorows, entry.row);
             },
         }
     }
@@ -1165,7 +1186,7 @@ pub const Tables = struct {
         _ = try writer.write("\n");
     }
 
-    pub fn display(self: Tables, writer: anytype, comptime colwidth: u8) !void {
+    pub fn display(self: SLRTables, writer: anytype, comptime colwidth: u8) !void {
         var col: SymbolId = 0;
         const itemfmt = comptime std.fmt.comptimePrint("{{: <{}}}", .{colwidth});
         const stritemfmt = comptime std.fmt.comptimePrint("{{s: <{}}}", .{colwidth});
@@ -1173,7 +1194,9 @@ pub const Tables = struct {
 
         // -- start header
         try writeByteNTimesNl(writer, '-', maxcol * colwidth);
-        try writer.print(stritemfmt ++ "action                  goto\n", .{""});
+        try writer.print(stritemfmt ++ "action", .{""});
+        try writer.writeByteNTimes(' ', (self.ginfo.terminalscount -| 1) * colwidth);
+        try writer.print(stritemfmt ++ "goto\n", .{""});
         try writeByteNTimesNl(writer, '-', maxcol * colwidth);
         _ = try writer.print(stritemfmt, .{"state"});
         col = 0;
@@ -1200,13 +1223,13 @@ pub const Tables = struct {
             try writer.print(itemfmt, .{row});
             col = 0;
             while (col <= self.ginfo.terminalscount) : (col += 1) {
-                if (self.goto.get(.{ .row = row, .col = .{ .ty = .term, .id = col } })) |value| {
+                if (self.actions.get(.{ .row = row, .col = .{ .ty = .term, .id = col } })) |value| {
                     try writer.print(itemfmt, .{value});
                 } else try writer.print(stritemfmt, .{" "});
             }
             col = 0;
             while (col <= self.ginfo.nonterminalscount) : (col += 1) {
-                if (self.goto.get(.{ .row = row, .col = .{ .ty = .nonterm, .id = col } })) |value| {
+                if (self.gotos.get(.{ .row = row, .col = .{ .ty = .nonterm, .id = col } })) |value| {
                     try writer.print(itemfmt, .{value});
                 } else try writer.print(stritemfmt, .{" "});
             }
@@ -1215,10 +1238,27 @@ pub const Tables = struct {
     }
 };
 
-pub fn createTables(allocator: Allocator, _ginfo: GrammarInfo, augmented_start: []const u8) !Tables {
+const ItemStateMap = std.AutoArrayHashMapUnmanaged(SLRTables.Entry, SymbolId);
+// FIXME: this needs to be able to store a productionchoice pair
+// or else productions need to be duplicated for each choice so that
+// A <- B / C
+// becomes
+// A <- B
+// A <- C
+fn nextStateId(allocator: Allocator, seen: *ItemStateMap, entry: SLRTables.Entry) !SymbolId {
+    const seencount = @intCast(StateId, seen.count()) + 1;
+    const gop = try seen.getOrPut(allocator, entry);
+    const stateid = if (gop.found_existing) gop.value_ptr.* else blk: {
+        gop.value_ptr.* = seencount;
+        break :blk seencount;
+    };
+    return stateid;
+}
+
+pub fn createTables(allocator: Allocator, _ginfo: GrammarInfo, augmented_start: []const u8) !SLRTables {
     // based on https://pages.github-dev.cs.illinois.edu/cs421-sp20/web/handouts/lr-parsing-tables.pdf
 
-    var tables: Tables = .{ .ginfo = try GrammarInfo.init(allocator, _ginfo.grammar.items) };
+    var tables: SLRTables = .{ .ginfo = try GrammarInfo.init(allocator, _ginfo.grammar.items) };
 
     var augmentedstart = try parseGrammar(allocator, std.testing.failing_allocator, augmented_start);
     var auginfo = try GrammarInfo.init(allocator, augmentedstart);
@@ -1236,18 +1276,12 @@ pub fn createTables(allocator: Allocator, _ginfo: GrammarInfo, augmented_start: 
     }
     if (itemsets.items.len == 0) return error.EmptyItemsets;
 
-    var seen: std.AutoArrayHashMapUnmanaged(Item, StateId) = .{};
+    var seen: ItemStateMap = .{};
     defer seen.deinit(allocator);
 
     for (itemsets.items) |itemset, i| {
         std.debug.print("itemset-{}\n", .{i});
         for (itemset.items) |item, j| {
-            const seencount = @intCast(StateId, seen.count());
-            const gop = try seen.getOrPut(allocator, item);
-            const stateid = if (gop.found_existing) gop.value_ptr.* else blk: {
-                gop.value_ptr.* = seencount;
-                break :blk seencount;
-            };
             std.debug.print("item-{} {}\n", .{ j, Item.Fmt.init(item, tables.ginfo) });
             const msyms = tables.ginfo.item_syms.get(item);
             const isfinal = msyms == null;
@@ -1256,29 +1290,30 @@ pub fn createTables(allocator: Allocator, _ginfo: GrammarInfo, augmented_start: 
                 // Enter a reduce action in the follow set columns, .reduce=sym.id
                 // TODO: follow set
                 // for now assume follow set = {$}
-                const colrow: TypedColRow = .{ .col = .{ .id = tables.ginfo.terminalscount, .ty = .term }, .row = @intCast(SymbolId, i) };
-                try tables.putNoClobber(allocator, .action, colrow, .{ .reduce = item.id });
+                const entry: SLRTables.Entry = .{ .col = .{ .id = tables.ginfo.terminalscount, .ty = .term }, .row = @intCast(SymbolId, i) };
+                try tables.putNoClobber(allocator, .action, entry, .{ .reduce = item.id });
             } else for (msyms.?.items) |sym| {
-                const nextstateid = stateid + 1;
-                // TODO: final
+                const symentry: SLRTables.Entry = .{ .col = sym, .row = item.pos };
+                const stateid = try nextStateId(allocator, &seen, symentry);
+                std.debug.print("stateid {} entry {}\n", .{ stateid, SLRTables.Entry.Fmt.init(symentry, tables.ginfo) });
                 if (sym.ty == .term) {
-                    const colrow: TypedColRow = .{ .col = sym, .row = @intCast(SymbolId, i) };
+                    const entry: SLRTables.Entry = .{ .col = sym, .row = @intCast(SymbolId, i) };
                     std.debug.print(
-                        "sym {} colrow {} state {} \n",
-                        .{ TidFmt.init(sym, tables.ginfo), TypedColRow.Fmt.init(colrow, tables.ginfo), nextstateid },
+                        "sym {} entry {} stateid {}\n",
+                        .{ TidFmt.init(sym, tables.ginfo), SLRTables.Entry.Fmt.init(entry, tables.ginfo), stateid },
                     );
                     // Enter a shift action in row n and column α,
-                    try tables.putNoClobber(allocator, .action, colrow, .shift);
+                    try tables.putNoClobber(allocator, .action, entry, .{ .shift = stateid });
                     // and enter n′ in the corresponding entry of the goto ts[i].
-                    try tables.putNoClobber(allocator, .goto, colrow, nextstateid);
+                    // try tables.putNoClobber(allocator, .goto, entry, nextstateid);
                 } else {
-                    const colrow: TypedColRow = .{ .col = sym, .row = @intCast(SymbolId, i) };
+                    const entry: SLRTables.Entry = .{ .col = sym, .row = @intCast(SymbolId, i) };
                     std.debug.print(
-                        "sym {} colrow {} state {}\n",
-                        .{ TidFmt.init(sym, tables.ginfo), TypedColRow.Fmt.init(colrow, tables.ginfo), nextstateid },
+                        "sym {} entry {} stateid {}\n",
+                        .{ TidFmt.init(sym, tables.ginfo), SLRTables.Entry.Fmt.init(entry, tables.ginfo), stateid },
                     );
                     // Enter n′ in the goto table for row n and nonterminal A.
-                    try tables.putNoClobber(allocator, .goto, colrow, nextstateid);
+                    try tables.putNoClobber(allocator, .goto, entry, stateid);
                 }
             }
         }
