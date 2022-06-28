@@ -3,6 +3,7 @@ const m = @import("mecha");
 const assert = std.debug.assert;
 const mem = std.mem;
 const Allocator = mem.Allocator;
+const print = std.debug.print;
 
 pub const Production = struct {
     name: []const u8 = &.{},
@@ -46,6 +47,14 @@ pub const Symbol = union(enum) {
                 for (children) |child| child.deinit(allocator);
                 allocator.free(children);
             },
+        }
+    }
+
+    pub fn text(sym: Symbol) []const u8 {
+        switch (sym) {
+            .name, .char_lit, .str_lit, .sqbkt_lit => |s| return s,
+            .optional, .some, .many, .not => |child| return text(child.*),
+            else => unreachable,
         }
     }
 
@@ -128,7 +137,8 @@ const showtrace = true;
 fn trace(comptime fmt: []const u8, args: anytype) void {
     // @compileLog(comptime std.fmt.comptimePrint(fmt, args));
     // @compileError(comptime std.fmt.comptimePrint(fmt, args));
-    if (@hasDecl(@This(), "showtrace")) std.debug.print(fmt, args);
+    if (@hasDecl(@This(), "showtrace"))
+        std.debug.print(fmt, args);
 }
 
 pub const p = struct {
@@ -180,12 +190,13 @@ pub const p = struct {
     pub const many_not_quote = m.many(m.oneOf(.{ escaped_char_lit, m.ascii.not(quote) }), .{ .collect = false, .min = 1 });
     pub const char_lit = m.combine(.{ quote, many_not_quote, quote });
     pub const escaped_str = m.convert(u8, convEscapeStrLit, m.combine(.{ char('\\'), m.oneOf(.{ char('"'), char('n'), char('\\') }) }));
-    pub const many_not_dquote = m.many(m.oneOf(.{ escaped_str, m.ascii.not(dquote) }), .{ .collect = false, .min = 1 });
+    pub const many_not_dquote = m.many(m.oneOf(.{ escaped_str, m.ascii.not(dquote) }), .{ .collect = false, .min = 0 });
     pub const str_lit = m.combine(.{ dquote, many_not_dquote, dquote });
     pub const many_not_sqbkt_r = m.many(m.ascii.not(sqbkt_r), .{ .collect = false, .min = 1 });
     pub const sqbkt_lit = m.combine(.{ sqbkt_l, many_not_sqbkt_r, sqbkt_r });
 
     fn convEscapeCharLit(_: Allocator, res: [2]u8) !u8 {
+        assert(res[0] == '\\');
         return switch (res[1]) {
             'n' => '\n',
             '\'' => '\'',
@@ -194,6 +205,7 @@ pub const p = struct {
         };
     }
     fn convEscapeStrLit(_: Allocator, res: [2]u8) !u8 {
+        assert(res[0] == '\\');
         return switch (res[1]) {
             'n' => '\n',
             '"' => '"',
@@ -336,7 +348,7 @@ fn oneSym(ctx: *Context, sym: Sym, seq: *std.ArrayListUnmanaged(Symbol)) !void {
 
             const s = nextSym(ctx);
             // const ss: [2][]const u8 = if (s != null) .{ @tagName(s.?.tag), s.?.str } else .{ "null", "" };
-            // std.debug.print("s {s}:{s}\n", .{ ss[0], ss[1] });
+            // trace("s {s}:{s}\n", .{ ss[0], ss[1] });
             assert(s == null or s.?.tag == .group_end);
 
             symbol.group = group.toOwnedSlice(ctx.allr);
@@ -365,11 +377,11 @@ fn oneSym(ctx: *Context, sym: Sym, seq: *std.ArrayListUnmanaged(Symbol)) !void {
         .choice => {
             assert(seq.items.len > 0);
             const last = seq.pop();
-            // std.debug.print("choice last {}\n", .{last});
+            // trace("choice last {}\n", .{last});
 
             const terminators = &.{ .choice, .group_end };
             var next = (try seqUntil(ctx, terminators)) orelse unreachable;
-            // std.debug.print("choice pending {}\n", .{ctx.pending_sym});
+            // trace("choice pending {}\n", .{ctx.pending_sym});
             var choices = std.ArrayListUnmanaged(Symbol){};
             if (last == .choice) {
                 try choices.appendSlice(ctx.allr, last.choice);
@@ -430,6 +442,10 @@ pub fn parseRule(ctx: *Context) Error!Rule {
     trace("parseRule\n", .{});
     var rule: Rule = .{ .source = ctx.rest, .root = undefined };
     var choices = std.ArrayListUnmanaged(Symbol){};
+    errdefer {
+        for (choices.items) |*c| c.deinit(ctx.allr);
+        choices.deinit(ctx.allr);
+    }
     while (!ctx.eof()) {
         const choice = try parseChoice(ctx);
         try choices.append(ctx.allr, choice);
@@ -443,9 +459,10 @@ pub fn parseFree(allocator: Allocator, prods: []const Production) void {
     allocator.free(prods);
 }
 
-pub fn parse(allr: Allocator, fallr: Allocator, src: []const u8) ![]const Production {
+pub fn parseGrammar(allr: Allocator, fallr: Allocator, src: []const u8) ![]const Production {
     var ctx = Context.init(allr, fallr, src);
     var prods = std.ArrayList(Production).init(ctx.allr);
+    errdefer for (prods.items) |*prod| prod.deinit(ctx.allr);
     trace("\nparse()\n", .{});
     while (ctx.rest.len > 0) {
         if (ctx.rest[0] == '#') {
@@ -503,7 +520,7 @@ pub fn matchLit(lit: Symbol, token: []const u8) MatchError!usize {
             while (rest.len > 0 and restlit.len > 0 and match) {
                 match = false;
                 const c = rest[0];
-                std.debug.print("sqbkt_lit c '{c}' restlit[0] '{c}'\n", .{ c, restlit[0] });
+                trace("sqbkt_lit c '{c}' restlit[0] '{c}'\n", .{ c, restlit[0] });
                 if (restlit.len > 1) {
                     const next = restlit[1];
                     if (next == '-') {
@@ -523,7 +540,7 @@ pub fn matchLit(lit: Symbol, token: []const u8) MatchError!usize {
                     }
                 }
 
-                std.debug.print("  match {}\n", .{match});
+                trace("  match {}\n", .{match});
                 rest = rest[@boolToInt(match)..];
             }
             break :blk token.len - rest.len;
@@ -538,7 +555,7 @@ pub fn matchLit(lit: Symbol, token: []const u8) MatchError!usize {
     };
 }
 
-pub fn parseWith(allocator: Allocator, fallr: Allocator, prods: []const Production, input: []const u8) !void {
+pub fn parseInput(allocator: Allocator, fallr: Allocator, prods: []const Production, input: []const u8) !void {
     var terminals = std.StringHashMap(Rule).init(allocator);
     var nonterminals = std.StringHashMap(Rule).init(allocator);
     defer {
@@ -548,7 +565,7 @@ pub fn parseWith(allocator: Allocator, fallr: Allocator, prods: []const Producti
     for (prods) |prod| {
         if (prod.rule.root.choice.len == 1) {
             const firstchoice = prod.rule.root.choice[0];
-            std.debug.print("firstchoice {}\n", .{firstchoice});
+            trace("firstchoice {}\n", .{firstchoice});
             if (isTerminal(firstchoice)) {
                 try terminals.put(prod.name, prod.rule);
                 continue;
@@ -562,251 +579,712 @@ pub fn parseWith(allocator: Allocator, fallr: Allocator, prods: []const Producti
     while (rest.len > 0) {
         if (m.combine(.{ comptime m.asStr(p.somenonws), p.ws })(fallr, rest)) |r| {
             rest = r.rest;
-            std.debug.print("token '{s}'\n", .{r.value});
+            trace("token '{s}'\n", .{r.value});
             var termsit = terminals.iterator();
             const matchedname = while (termsit.next()) |ent| {
                 const matchlen = try matchLit(ent.value_ptr.*.root.choice[0], r.value);
-                std.debug.print("checking {s} matchlen {}\n", .{ ent.key_ptr.*, matchlen });
+                trace("checking {s} matchlen {}\n", .{ ent.key_ptr.*, matchlen });
                 if (matchlen == r.value.len) {
-                    std.debug.print("matched {} chars with {s} \n", .{ matchlen, ent.key_ptr.* });
+                    trace("matched {} chars with {s} \n", .{ matchlen, ent.key_ptr.* });
                     break ent.key_ptr.*;
                 }
             } else null;
             if (matchedname) |name| {
-                // std.debug.print("matchedname {s}\n", .{k});
+                // trace("matchedname {s}\n", .{k});
                 stack.append(name);
             } else break;
         } else |_| {}
     }
-
-    // {
-    //     var it = terminals.iterator();
-    //     std.debug.print("terminals \n", .{});
-    //     while (it.next()) |ent| {
-    //         std.debug.print("  {s}\n", .{ent.key_ptr.*});
-    //     }
-    // }
-    // {
-    //     var it = nonterminals.iterator();
-    //     std.debug.print("nonterminals \n", .{});
-    //     while (it.next()) |ent| {
-    //         std.debug.print("  {s}\n", .{ent.key_ptr.*});
-    //     }
-    // }
 }
 
-// pub fn Tables(comptime NTerminals: u16, comptime NSymbols: u16, comptime NStates: u16) type {
-//     return struct {
-//         action: [NTerminals + 1][NStates]ShiftReduce(u8) = undefined,
-//         goto: [NSymbols][NStates]I = undefined,
-//         pub const I = std.meta.Int(.unsigned, std.math.log2_int_ceil(NStates));
-//     };
-// }
+fn shift(fallr: Allocator, rest: *[]const u8) []const u8 {
+    if (p.ws(fallr, rest.*)) |r| rest.* = r.rest else |_| {}
+    if (m.combine(.{ comptime m.asStr(p.somenonws), p.ws })(fallr, rest.*)) |r| {
+        rest.* = r.rest;
+        return r.value;
+    } else |_| return "";
+}
 
-pub fn ShiftReduce(comptime I: type) type {
+pub fn parseLR(allocator: Allocator, fallr: Allocator, ginfo: GrammarInfo, input: []const u8) !void {
+    var tables = try createTables(allocator, ginfo, "");
+    defer tables.deinit(allocator);
+    // var stack = std.ArrayList(ShiftReduce(SymbolId)).init(allocator);
+    // TODO: not sure if the stack should be states or symbols?
+    // var stack = std.ArrayList(SymbolId).init(allocator);
+    var stack = std.ArrayList(StateId).init(allocator);
+    defer stack.deinit();
+    try stack.append(0);
+
+    var rest = input;
+    var token = shift(fallr, &rest);
+    var symbolid: SymbolId = 0;
+    while (rest.len > 0 and stack.items.len > 0) {
+        const stateid = stack.items[stack.items.len - 1];
+        const action = tables.action.get(.{ symbolid, stateid }) orelse unreachable;
+        switch (action) {
+            // shift next state onto stack
+            .shift => {
+                token = shift(fallr, &rest);
+                symbolid = 0;
+                // try stack.append(tables.goto.get(.{ symbolid, stateid }) orelse unreachable);
+            },
+            .reduce => |nextstateid| {
+                const len = 1;
+                stack.items.len -= len;
+                try stack.append(tables.goto.get(.{ stack.items[stack.items.len - 1], nextstateid }) orelse unreachable);
+                if (true) @panic("TODO: output the production nextstateid");
+            },
+        }
+
+        // ColRow: (symbolid, stateid)
+        const nextstateid = tables.goto.get(.{ symbolid, stateid }) orelse unreachable;
+        trace("nextstateid {} action {}", .{ nextstateid, action });
+        // tables.action.get()
+    }
+}
+
+pub const SymbolId = u16;
+pub const TypedSymbolId = struct {
+    id: SymbolId,
+    ty: Type,
+    pub const Type = enum { term, nonterm };
+
+    pub fn init(id: SymbolId, ty: Type) TypedSymbolId {
+        return .{
+            .id = id,
+            .ty = ty,
+        };
+    }
+
+    // pub fn adjustedId(self: TypedSymbolId, ginfo: GrammarInfo) SymbolId {
+    //     return self.id + ((ginfo.terminalscount + 1) * @boolToInt(self.ty == .nonterm));
+    // }
+
+};
+
+pub const GrammarInfo = struct {
+    grammar: std.ArrayListUnmanaged(Production) = .{},
+    names_to_syms: NameTypedSymbolsMap = .{},
+    syms_to_names: TypedSymbolNamesMap = .{},
+    prod_pos_symbols: ProdPosTypedSymbolsMap = .{},
+    symbol_prod_pos: TypedSymbolProdPosMap = .{},
+    terminalscount: SymbolId = 0,
+    nonterminalscount: SymbolId = 0,
+
+    pub const NameTypedSymbolsMap = std.StringArrayHashMapUnmanaged(TypedSymbolId);
+    pub const TypedSymbolNamesMap = std.AutoArrayHashMapUnmanaged(TypedSymbolId, []const u8);
+    const TypedSymbolsList = std.ArrayListUnmanaged(TypedSymbolId);
+    const ProdPosTypedSymbolsMap = std.AutoArrayHashMapUnmanaged(Item, TypedSymbolsList);
+    const TypedSymbolProdPosMap = std.AutoArrayHashMapUnmanaged(TypedSymbolId, ItemSet);
+
+    pub fn init(allocator: Allocator, grammar: []const Production) !GrammarInfo {
+        var result: GrammarInfo = .{};
+        try result.addToGrammar(allocator, grammar);
+        return result;
+    }
+
+    pub fn deinit(self: *GrammarInfo, allocator: Allocator) void {
+        self.names_to_syms.deinit(allocator);
+        self.syms_to_names.deinit(allocator);
+        self.grammar.deinit(allocator);
+        for (self.prod_pos_symbols.values()) |*list| list.deinit(allocator);
+        self.prod_pos_symbols.deinit(allocator);
+        for (self.symbol_prod_pos.values()) |*list| list.deinit(allocator);
+        self.symbol_prod_pos.deinit(allocator);
+    }
+
+    fn nonterminalscountCheck(self: GrammarInfo) SymbolId {
+        var result: SymbolId = 0;
+        for (self.names_to_syms.values()) |s| result += @boolToInt(s.ty == .nonterm);
+        return result;
+    }
+    fn terminalscountCheck(self: GrammarInfo) SymbolId {
+        var result: SymbolId = 0;
+        for (self.names_to_syms.values()) |s| result += @boolToInt(s.ty == .term);
+        return result;
+    }
+
+    fn populateIdTables(self: *GrammarInfo, allocator: Allocator, sym: Symbol, pos: u16, maxpos: ?*u16, prodid: u16) Error!void {
+        trace("populateIdTables() {} pos {} prodid {} \n", .{ sym, pos, prodid });
+        if (maxpos) |mp| mp.* = std.math.max(mp.*, pos);
+        switch (sym) {
+            .char_lit, .str_lit, .sqbkt_lit => |s| {
+                trace("lit {s}\n", .{s});
+                var id = TypedSymbolId.init(self.terminalscount, .term);
+                const gop = try self.names_to_syms.getOrPut(allocator, s);
+                if (gop.found_existing) id = gop.value_ptr.* else gop.value_ptr.* = id;
+                try self.addProdPosSym(allocator, id, prodid, pos);
+                self.terminalscount += @boolToInt(!gop.found_existing);
+            },
+            .name => |s| {
+                trace("name {s}\n", .{s});
+                var id = TypedSymbolId.init(self.nonterminalscount, .nonterm);
+                const gop = try self.names_to_syms.getOrPut(allocator, s);
+                if (gop.found_existing) id = gop.value_ptr.* else gop.value_ptr.* = id;
+                try self.addProdPosSym(allocator, id, prodid, pos);
+                self.nonterminalscount += @boolToInt(!gop.found_existing);
+            },
+            .optional, .some, .many, .not => |s| {
+                try self.populateIdTables(allocator, s.*, pos, maxpos, prodid);
+            },
+            .seq, .group => |ss| for (ss) |s, i| {
+                try self.populateIdTables(allocator, s, pos + @intCast(u16, i), maxpos, prodid);
+            },
+            .choice => |ss| for (ss) |s| {
+                try self.populateIdTables(allocator, s, pos, maxpos, prodid);
+            },
+            else => unreachable,
+        }
+    }
+
+    fn addProdPosSym(self: *GrammarInfo, allocator: Allocator, id: TypedSymbolId, prodid: u16, pos: u16) !void {
+        trace("addProdPosSym() id {} prodid {} pos {}\n", .{ id.id, prodid, pos });
+        {
+            const gop = try self.prod_pos_symbols.getOrPut(allocator, Item.init(prodid, pos));
+            if (!gop.found_existing) gop.value_ptr.* = .{};
+            try gop.value_ptr.*.append(allocator, id);
+        }
+        {
+            const gop = try self.symbol_prod_pos.getOrPut(allocator, id);
+            if (!gop.found_existing) gop.value_ptr.* = .{};
+            try gop.value_ptr.*.append(allocator, Item.init(prodid, pos));
+        }
+    }
+
+    pub fn addToGrammar(self: *GrammarInfo, allocator: Allocator, grammar: []const Production) !void {
+        for (grammar) |prod, _prodid| {
+            const id = TypedSymbolId.init(self.nonterminalscount, .nonterm);
+            // TODO: check for duplicate production names somewhere
+            {
+                const gop = try self.names_to_syms.getOrPut(allocator, prod.name);
+                if (!gop.found_existing) gop.value_ptr.* = id;
+                self.nonterminalscount += @boolToInt(!gop.found_existing);
+            }
+            const prodid = @intCast(u16, _prodid + self.grammar.items.len);
+
+            var maxpos: u16 = 0;
+            try self.populateIdTables(allocator, prod.rule.root, 0, &maxpos, prodid);
+            trace("-- '{s}' prodid {} terms {} nonterms {} maxpos {}\n", .{ prod.name, prodid, self.terminalscount, self.nonterminalscount, maxpos });
+        }
+
+        var it = self.names_to_syms.iterator();
+        while (it.next()) |e| {
+            const gop = try self.syms_to_names.getOrPut(allocator, e.value_ptr.*);
+            if (!gop.found_existing) gop.value_ptr.* = e.key_ptr.*;
+        }
+        try self.grammar.appendSlice(allocator, grammar);
+
+        trace("glen {} ppslen {} nonterms/terms {}/{} total names/syms {}/{}\n", .{
+            self.grammar.items.len,
+            self.prod_pos_symbols.count(),
+            self.nonterminalscount,
+            self.terminalscount,
+            self.names_to_syms.count(),
+            self.syms_to_names.count(),
+        });
+        assert(self.nonterminalscount + self.terminalscount == self.names_to_syms.count());
+        assert(self.names_to_syms.count() == self.syms_to_names.count());
+
+        assert(self.terminalscount == self.terminalscountCheck());
+        assert(self.nonterminalscount == self.nonterminalscountCheck());
+    }
+
+    pub fn idToName(ginfo: GrammarInfo, tid: TypedSymbolId) ?[]const u8 {
+        return ginfo.syms_to_names.get(tid);
+    }
+    pub fn nameToTid(ginfo: GrammarInfo, name: []const u8) ?TypedSymbolId {
+        return ginfo.names_to_syms.get(name);
+    }
+    // pub fn nameToSymbolId(ginfo: GrammarInfo, name: []const u8) ?SymbolId {
+    //     return if (ginfo.names_to_syms.get(name)) |tid| tid.adjustedId(ginfo) else null;
+    // }
+    pub fn nameToProdId(ginfo: GrammarInfo, name: []const u8) ?SymbolId {
+        for (ginfo.grammar.items) |prod, i| {
+            if (mem.eql(u8, name, prod.name)) return @intCast(SymbolId, i);
+        }
+        return null;
+    }
+    pub fn nameToItem(ginfo: GrammarInfo, name: []const u8, dotpos: u16) ?ItemSet.Item {
+        return if (ginfo.name_to_tyid.get(name)) |tyid|
+            ItemSet.Item{ .symid = tyid.id, .dotpos = dotpos }
+        else
+            null;
+    }
+    pub fn itemSet(ginfo: GrammarInfo, allocator: Allocator, dotpos: u16) !ItemSet {
+        var result: ItemSet = .{};
+        for (ginfo.grammar.items) |prod| {
+            const tid = ginfo.nameToTid(prod.name) orelse unreachable;
+            assert(tid.ty == .nonterm);
+            try result.append(allocator, .{ .id = tid.id, .pos = dotpos });
+        }
+        return result;
+    }
+    pub fn itemSetUsing(ginfo: GrammarInfo, allocator: Allocator, lookupginfo: GrammarInfo, dotpos: u16) !ItemSet {
+        var result: ItemSet = .{};
+        for (ginfo.grammar.items) |prod| {
+            const tid = lookupginfo.nameToTid(prod.name) orelse unreachable;
+            assert(tid.ty == .nonterm);
+            try result.append(allocator, .{ .id = tid.id, .pos = dotpos });
+        }
+        return result;
+    }
+    pub fn itemSetFromNames(ginfo: GrammarInfo, allocator: Allocator, names: []const []const u8, dotpos: u16) !ItemSet {
+        var result: ItemSet = .{};
+        for (names) |name| {
+            const tid = ginfo.nameToTid(name) orelse return error.MissingName;
+            assert(tid.ty == .nonterm);
+            try result.append(allocator, .{ .id = tid.id, .pos = dotpos });
+        }
+        return result;
+    }
+};
+
+pub const ItemSet = std.ArrayListUnmanaged(Item);
+pub const ItemSetList = std.ArrayListUnmanaged(ItemSet);
+pub const Item = struct {
+    id: SymbolId,
+    pos: u16,
+    pub fn init(id: SymbolId, pos: u16) Item {
+        return .{ .id = id, .pos = pos };
+    }
+    pub fn fromArr(arr: [2]u16) Item {
+        return @bitCast(Item, arr);
+    }
+    pub fn eql(a: Item, b: Item) bool {
+        return @bitCast(u32, a) == @bitCast(u32, b);
+    }
+
+    pub const Fmt = struct {
+        item: Item,
+        ginfo: GrammarInfo,
+        pub fn init(item: Item, ginfo: GrammarInfo) Fmt {
+            return .{
+                .item = item,
+                .ginfo = ginfo,
+            };
+        }
+
+        pub fn format(self: Fmt, comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
+            const id = self.item.id;
+            if (self.ginfo.idToName(.{ .id = id, .ty = .nonterm })) |_| {
+                try writer.print("{s} <- ", .{self.ginfo.grammar.items[id].name});
+                var dotpos: u16 = 0;
+                var wrotedot = false;
+                // const dot: []const u8 = &[_]u8{ 250, ' ' };
+                const dot: []const u8 = &[_]u8{ '.', ' ' };
+                while (self.ginfo.prod_pos_symbols.get(.{ .id = id, .pos = dotpos })) |tids| : (dotpos += 1) {
+                    if (self.item.pos == dotpos) {
+                        _ = try writer.write(dot);
+                        wrotedot = true;
+                    }
+
+                    if (tids.items.len > 1) {
+                        _ = try writer.write("(");
+                        for (tids.items) |tid, i| {
+                            if (i != 0) _ = try writer.write(" / ");
+                            try writer.print("{s}", .{TidFmt.init(tid, self.ginfo)});
+                        }
+                        _ = try writer.write(") ");
+                    } else {
+                        try writer.print("{s} ", .{TidFmt.init(tids.items[0], self.ginfo)});
+                    }
+                }
+                if (!wrotedot) _ = try writer.write(dot);
+            } else try writer.print(". {s} ", .{self.ginfo.idToName(.{ .id = id, .ty = .term })});
+        }
+    };
+};
+
+pub fn itemSetEql(a: ItemSet, b: ItemSet) bool {
+    return a.items.len == b.items.len and for (a.items) |aitem| {
+        const b_contains_aitem = for (b.items) |bitem| {
+            if (bitem.eql(aitem)) break true;
+        } else false;
+
+        if (!b_contains_aitem) break false;
+    } else true;
+}
+
+pub fn itemSetsContain(sets: []const ItemSet, set: ItemSet) bool {
+    for (sets) |seta| {
+        if (itemSetEql(seta, set)) return true;
+    }
+    return false;
+}
+
+pub const ItemSetFmt = struct {
+    itemset: ItemSet,
+    ginfo: GrammarInfo,
+    pub fn init(itemset: ItemSet, ginfo: GrammarInfo) ItemSetFmt {
+        return .{
+            .itemset = itemset,
+            .ginfo = ginfo,
+        };
+    }
+
+    pub fn format(self: ItemSetFmt, comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
+        _ = try writer.write("{");
+        for (self.itemset.items) |item, i| {
+            if (i != 0) _ = try writer.write(", ");
+            try writer.print("{}", .{Item.Fmt.init(item, self.ginfo)});
+        }
+        _ = try writer.write("}");
+    }
+};
+
+pub const TidsFmt = struct {
+    tids: []const TypedSymbolId,
+    ginfo: GrammarInfo,
+    pub fn init(tids: []const TypedSymbolId, ginfo: GrammarInfo) TidsFmt {
+        return .{
+            .tids = tids,
+            .ginfo = ginfo,
+        };
+    }
+
+    pub fn format(self: TidsFmt, comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
+        for (self.tids) |item| {
+            try writer.print("{}, ", .{TidFmt.init(item, self.ginfo)});
+        }
+    }
+};
+
+pub const TidFmt = struct {
+    tid: TypedSymbolId,
+    ginfo: GrammarInfo,
+    pub fn init(tid: TypedSymbolId, ginfo: GrammarInfo) TidFmt {
+        return .{
+            .tid = tid,
+            .ginfo = ginfo,
+        };
+    }
+    pub fn format(self: TidFmt, comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
+        // try writer.print("{s}:{}, ", .{ self.ginfo.idToName(self.tid), self.tid.id });
+        try writer.print("{s}", .{self.ginfo.idToName(self.tid)});
+    }
+};
+
+// fn closure(I) f
+// J = I;
+// while(true) {
+//   for ( each '.B' in J ) {
+//      for ( each 'B -> .y' in G ) {
+//          if ( 'B -> .y' is not in J )
+//              add 'B -> .y' to J ;
+//      }
+//   }
+//   until no more items are added to J on one round;
+//}
+// return J;
+pub fn closure(allocator: Allocator, I: ItemSet, ginfo: GrammarInfo) !ItemSet {
+    trace("closure({})\n", .{ItemSetFmt.init(I, ginfo)});
+
+    // NOTE: the final argument to std.ArrayHashMapUnmanaged() is store_hash.
+    // it is set to false here to prevent a segfault.  not sure why its needed.
+    // var J: std.AutoArrayHashMapUnmanaged(Item, void) = .{}; // <--- causes segfault
+    var J: std.ArrayHashMapUnmanaged(Item, void, std.array_hash_map.AutoContext(Item), false) = .{};
+    defer J.deinit(allocator);
+    for (I.items) |i| try J.put(allocator, i, {});
+
+    while (true) {
+        const count = J.count();
+        // std.debug.print("J.count() {}\n", .{J.count()});
+        for (J.keys()) |item| { // NOTE: segfault here if AutoArrayHashMapUnmanaged is used
+            // trace("  item {}\n", .{Item.Fmt.init(item, ginfo)});
+            const Bs = ginfo.prod_pos_symbols.get(item) orelse continue;
+            // trace("Bs {s}\n", .{TidsFmt.init(Bs.items, ginfo)});
+            for (Bs.items) |b| {
+                if (b.ty == .term) continue;
+                // trace("b {}\n", .{TidFmt.init(b, ginfo)});
+                var newitem: Item = .{ .id = b.id, .pos = 0 };
+                try J.put(allocator, newitem, {});
+            }
+        }
+        if (count == J.count()) break;
+    }
+
+    const keys = J.keys();
+    return ItemSet{ .items = try allocator.dupe(Item, keys), .capacity = keys.len };
+}
+
+// Compilers-DragonBook p. 261
+
+// SetOfItems goto(I, X ) {
+//  initialize J to b e the empty set;
+//  for ( each item ['.X'] in I )
+//      add item ['X.'] to set J ;
+//  return closure(J);
+//}
+
+// goto([S' <- .S], S) => [S' <- S.]
+pub fn goto(allocator: Allocator, I: ItemSet, X: TypedSymbolId, ginfo: GrammarInfo) !ItemSet {
+    var result = ItemSet{};
+    defer result.deinit(allocator);
+
+    trace("goto(I: {}, X: {})\n", .{ ItemSetFmt.init(I, ginfo), TidFmt.init(X, ginfo) });
+    // lookup X by id to get [(prod, pos)]
+    // var X_ = X;
+    // X_.ty.remove(.final);
+    const mprodposlist = ginfo.symbol_prod_pos.get(X);
+    const prodposlist = if (mprodposlist) |l| l else ItemSet{};
+    // trace("prodposlist {any}\n", .{ItemSetFmt.init(prodposlist, ginfo)});
+    for (prodposlist.items) |prodpos| {
+        try result.append(allocator, .{ .id = prodpos.id, .pos = prodpos.pos + 1 });
+    }
+    return closure(allocator, result, ginfo);
+}
+
+// void items(G') {
+//   C = closure({[S' -> S]}) ;
+//   repeat
+//     for ( each set of items I in C )
+//       for ( each grammar symbol X )
+//         if ( GOTO(I ; X ) is not empty and not in C )
+//           add GOTO(I ; X ) to C ;
+//   until no new sets of items are added to C on a round;
+// }
+pub fn lr0items(allr: Allocator, set0: ItemSet, ginfo: GrammarInfo) !ItemSetList {
+    trace("lr0items({})\n", .{ItemSetFmt.init(set0, ginfo)});
+    var itemsets = ItemSetList{};
+    try itemsets.append(allr, try closure(allr, set0, ginfo));
+    while (true) {
+        const count = itemsets.items.len;
+        // trace("itemsets.len {}\n", .{count});
+        for (itemsets.items) |I| {
+            var next = ItemSet{};
+            defer next.deinit(allr);
+            // trace("  I: {}\n", .{ItemSetFmt.init(I, ginfo)});
+            // trace("  I: {any}\n", .{I.items});
+            for (ginfo.syms_to_names.keys()) |X| {
+                var G = try goto(allr, I, X, ginfo);
+                // trace("    G: {}\n", .{ItemSetFmt.init(G, ginfo)});
+                // trace("    G: {any}\n", .{G.items});
+                if (G.items.len > 0 and !itemSetsContain(itemsets.items, G))
+                    try itemsets.append(allr, G)
+                else
+                    G.deinit(allr);
+            }
+        }
+        if (itemsets.items.len == count) break;
+    }
+
+    for (itemsets.items) |itemset, i| {
+        // trace("itemset {}\n{any}\n", .{ i, itemset.items });
+        trace("itemset {}: {}\n", .{ i, ItemSetFmt.init(itemset, ginfo) });
+    }
+    return itemsets;
+}
+
+pub const StateId = u16;
+pub const ColRow = struct {
+    col: SymbolId = 0,
+    row: SymbolId = 0,
+    pub fn max(a: ColRow, b: ColRow) ColRow {
+        // const V = std.meta.Vector(2, SymbolId);
+        // const V2 = std.meta.Vector(2, u1);
+        // const va = @bitCast(V, a);
+        // const vb = @bitCast(V, b);
+        // const cmp: [2]SymbolId = @as([2]SymbolId, @bitCast(V2, va > vb));
+        // return @bitCast(ColRow, cmp);
+        const row = std.math.max(a.row, b.row);
+        const col = std.math.max(a.col, b.col);
+        return .{ .row = row, .col = col };
+    }
+};
+
+pub const TypedColRow = struct {
+    col: TypedSymbolId,
+    row: SymbolId = 0,
+
+    pub const Fmt = struct {
+        tcr: TypedColRow,
+        ginfo: GrammarInfo,
+        pub fn init(tcr: TypedColRow, ginfo: GrammarInfo) Fmt {
+            return .{
+                .tcr = tcr,
+                .ginfo = ginfo,
+            };
+        }
+        pub fn format(self: @This(), comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
+            try writer.print("{}:{}", .{ TidFmt.init(self.tcr.col, self.ginfo), self.tcr.row });
+        }
+    };
+};
+
+pub fn Action(comptime I: type) type {
     return union(enum) {
         shift,
         reduce: I,
+        accept,
+        pub fn format(self: @This(), comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
+            switch (self) {
+                .shift => _ = try writer.write("s"),
+                .reduce => |r| _ = try writer.print("r{}", .{r}),
+                .accept => _ = try writer.write("$"),
+            }
+        }
     };
 }
-
-fn populateIdTables(termids: *SymbolIdMap, nontermids: *SymbolIdMap, sym: Symbol) Error!void {
-    trace("populateIdTables {}\n", .{sym});
-    switch (sym) {
-        .char_lit, .str_lit, .sqbkt_lit => |s| try termids.put(s, @intCast(u16, termids.count())),
-        .name => |s| try nontermids.put(s, @intCast(u16, nontermids.count())),
-        .optional, .some, .many, .not => |s| {
-            try populateIdTables(termids, nontermids, s.*);
-        },
-        .choice, .seq, .group => |ss| for (ss) |s| {
-            try populateIdTables(termids, nontermids, s);
-        },
-        else => unreachable,
+pub const ActionTable = std.AutoArrayHashMapUnmanaged(TypedColRow, Action(StateId));
+pub const GotoTable = std.AutoArrayHashMapUnmanaged(TypedColRow, StateId);
+pub const Tables = struct {
+    action: ActionTable = .{},
+    goto: GotoTable = .{},
+    actionrows: u16 = 0,
+    gotorows: u16 = 0,
+    ginfo: GrammarInfo,
+    pub const Type = enum { action, goto };
+    pub fn deinit(self: *Tables, allocator: Allocator) void {
+        self.action.deinit(allocator);
+        self.goto.deinit(allocator);
+        self.ginfo.deinit(allocator);
     }
-}
 
-fn nameId(name: []const u8, terminal_ids: SymbolIdMap, nonterminal_ids: SymbolIdMap, terminalscount: SymbolId) SymbolId {
-    return terminal_ids.get(name) orelse
-        ((nonterminal_ids.get(name) orelse unreachable) + terminalscount);
-}
-
-fn idName(id: SymbolId, terminal_ids: SymbolIdMap, nonterminal_ids: SymbolIdMap, terminalscount: SymbolId) ?SymbolId {
-    {
-        var it = terminal_ids.iterator();
-        while (it.next()) |ent| : (id += 1) {
-            if (id == ent.value_ptr.*) return ent.key_ptr.*;
+    pub fn putNoClobber(self: *Tables, allocator: Allocator, comptime ty: Type, colrow: TypedColRow, value: anytype) !void {
+        switch (ty) {
+            .action => {
+                const gop = try self.action.getOrPut(allocator, colrow);
+                // TODO: handle existing
+                if (gop.found_existing)
+                    std.debug.print("  found existing\n", .{});
+                // if (gop.found_existing) return error.FoundExisting;
+                gop.value_ptr.* = value;
+                self.actionrows = std.math.max(self.actionrows, colrow.row);
+            },
+            .goto => {
+                const gop = try self.goto.getOrPut(allocator, colrow);
+                // TODO: handle existing
+                if (gop.found_existing)
+                    std.debug.print("  found existing\n", .{});
+                // if (gop.found_existing) return error.FoundExisting;
+                gop.value_ptr.* = value;
+                self.gotorows = std.math.max(self.gotorows, colrow.row);
+            },
         }
     }
-    {
-        var it = nonterminal_ids.iterator();
-        while (it.next()) |ent| : (id += 1) {
-            if (id == ent.value_ptr.* + terminalscount) return ent.key_ptr.*;
+
+    fn writeByteNTimesNl(writer: anytype, byte: u8, n: usize) !void {
+        try writer.writeByteNTimes(byte, n);
+        _ = try writer.write("\n");
+    }
+
+    pub fn display(self: Tables, writer: anytype, comptime colwidth: u8) !void {
+        var col: SymbolId = 0;
+        const itemfmt = comptime std.fmt.comptimePrint("{{: <{}}}", .{colwidth});
+        const stritemfmt = comptime std.fmt.comptimePrint("{{s: <{}}}", .{colwidth});
+        const maxcol = (self.ginfo.terminalscount + self.ginfo.nonterminalscount) + 3;
+
+        // -- start header
+        try writeByteNTimesNl(writer, '-', maxcol * colwidth);
+        try writer.print(stritemfmt ++ "action                  goto\n", .{""});
+        try writeByteNTimesNl(writer, '-', maxcol * colwidth);
+        _ = try writer.print(stritemfmt, .{"state"});
+        col = 0;
+        while (col <= self.ginfo.terminalscount) : (col += 1) {
+            if (col == self.ginfo.terminalscount)
+                _ = try writer.print(stritemfmt, .{"$"})
+            else
+                try writer.print(stritemfmt, .{self.ginfo.idToName(.{ .ty = .term, .id = col })});
+        }
+        col = 0;
+        while (col <= self.ginfo.nonterminalscount) : (col += 1) {
+            if (col == self.ginfo.nonterminalscount)
+                _ = try writer.print(stritemfmt, .{"$"})
+            else
+                try writer.print(stritemfmt, .{self.ginfo.idToName(.{ .ty = .nonterm, .id = col })});
+        }
+        _ = try writer.write("\n");
+        try writeByteNTimesNl(writer, '-', maxcol * colwidth);
+        // -- end header
+
+        const maxrow = std.math.max(self.actionrows, self.gotorows);
+        var row: SymbolId = 0;
+        while (row <= maxrow) : (row += 1) {
+            try writer.print(itemfmt, .{row});
+            col = 0;
+            while (col <= self.ginfo.terminalscount) : (col += 1) {
+                if (self.goto.get(.{ .row = row, .col = .{ .ty = .term, .id = col } })) |value| {
+                    try writer.print(itemfmt, .{value});
+                } else try writer.print(stritemfmt, .{" "});
+            }
+            col = 0;
+            while (col <= self.ginfo.nonterminalscount) : (col += 1) {
+                if (self.goto.get(.{ .row = row, .col = .{ .ty = .nonterm, .id = col } })) |value| {
+                    try writer.print(itemfmt, .{value});
+                } else try writer.print(stritemfmt, .{" "});
+            }
+            try writer.print("\n", .{});
         }
     }
-    return null;
-}
+};
 
-const SymbolId = u16;
-const SymbolIdMap = std.StringArrayHashMap(SymbolId);
-const StateId = u8;
-const ColRow = std.meta.Tuple(&.{ SymbolId, StateId });
-
-const ProdMap = std.StringHashMap(Production);
-const ActionTable = std.AutoArrayHashMapUnmanaged(ColRow, ShiftReduce(StateId));
-const GotoTable = std.AutoArrayHashMapUnmanaged(ColRow, StateId);
-const Tables = struct { action: ActionTable, goto: GotoTable };
-const start_symname = "S'";
-pub fn createTables(allocator: Allocator, prods: []const Production) !Tables {
+pub fn createTables(allocator: Allocator, _ginfo: GrammarInfo, augmented_start: []const u8) !Tables {
     // based on https://pages.github-dev.cs.illinois.edu/cs421-sp20/web/handouts/lr-parsing-tables.pdf
-    var prodmap = ProdMap.init(allocator);
-    var terminal_ids = SymbolIdMap.init(allocator);
-    var nonterminal_ids = SymbolIdMap.init(allocator);
+
+    var tables: Tables = .{ .ginfo = try GrammarInfo.init(allocator, _ginfo.grammar.items) };
+
+    var augmentedstart = try parseGrammar(allocator, std.testing.failing_allocator, augmented_start);
+    var auginfo = try GrammarInfo.init(allocator, augmentedstart);
     defer {
-        prodmap.deinit();
-        terminal_ids.deinit();
-        nonterminal_ids.deinit();
+        parseFree(allocator, augmentedstart);
+        auginfo.deinit(allocator);
     }
-    // populate terminal/nonterminal_ids tables
-    for (prods) |prod| {
-        try prodmap.put(prod.name, prod);
-        if (prod.rule.root.choice.len == 1) {
-            const firstchoice = prod.rule.root.choice[0];
-            trace("firstchoice {}\n", .{firstchoice});
-            if (isTerminal(firstchoice)) {
-                try terminal_ids.put(prod.name, @intCast(u16, terminal_ids.count()));
-                continue;
-            }
-        }
-        if (!mem.eql(u8, prod.name, start_symname))
-            try nonterminal_ids.put(prod.name, @intCast(u16, nonterminal_ids.count()));
-        try populateIdTables(&terminal_ids, &nonterminal_ids, prod.rule.root);
-    }
-    const terminalscount = @intCast(SymbolId, terminal_ids.count());
-    const nonterminalscount = @intCast(SymbolId, nonterminal_ids.count());
-
-    trace("terminal_ids.count() {}\n", .{terminalscount});
-    trace("nonterminal_ids.count() {}\n", .{nonterminalscount});
-
-    var actiontable = ActionTable{};
-    var gototable = GotoTable{};
+    try tables.ginfo.addToGrammar(allocator, auginfo.grammar.items);
+    var set0 = try auginfo.itemSetUsing(allocator, tables.ginfo, 0);
+    var itemsets = try lr0items(allocator, set0, tables.ginfo);
     defer {
-        actiontable.deinit(allocator);
-        gototable.deinit(allocator);
+        set0.deinit(allocator);
+        for (itemsets.items) |*itemset| itemset.deinit(allocator);
+        itemsets.deinit(allocator);
     }
-    var stateid: StateId = 1;
+    if (itemsets.items.len == 0) return error.EmptyItemsets;
 
-    // state 0: insert initial states (row 0) into goto table
-    const start_firstname = try getFirstNameOf(allocator, prodmap.get(start_symname).?);
-    const start_firstid = nameId(start_firstname, terminal_ids, nonterminal_ids, terminalscount);
-    trace("start_firstname '{s}':{}\n", .{ start_firstname, start_firstid });
-    try gototable.put(allocator, .{ start_firstid, 0 }, stateid);
-    displayTable("goto", gototable);
-    stateid += 1;
-    const closure = try getClosure(allocator, start_symname, prodmap);
-    defer allocator.free(closure);
-    trace("closure.len {}\n", .{closure.len});
+    var seen: std.AutoArrayHashMapUnmanaged(Item, StateId) = .{};
+    defer seen.deinit(allocator);
 
-    for (closure[1..]) |cl| {
-        var pos: u8 = 0;
-        var names = std.StringHashMap(void).init(allocator);
-        defer names.deinit();
-        try getNamesAtPosition(0, cl.rule.root, &names, &pos, null);
-        trace("cl {s} names.count {} at pos 0\n", .{ cl.name, names.count() });
-        var it = names.iterator();
-        while (it.next()) |ent| {
-            const id = nameId(ent.key_ptr.*, terminal_ids, nonterminal_ids, terminalscount);
-            const gop = try gototable.getOrPut(allocator, .{ id, 0 });
-            if (!gop.found_existing) {
-                trace("  adding state {} name {s}:{}\n", .{ stateid, ent.key_ptr.*, id });
-                gop.value_ptr.* = stateid;
-                stateid += 1;
+    for (itemsets.items) |itemset, i| {
+        std.debug.print("itemset-{}\n", .{i});
+        for (itemset.items) |item, j| {
+            const seencount = @intCast(StateId, seen.count());
+            const gop = try seen.getOrPut(allocator, item);
+            const stateid = if (gop.found_existing) gop.value_ptr.* else blk: {
+                gop.value_ptr.* = seencount;
+                break :blk seencount;
+            };
+            std.debug.print("item-{} {}\n", .{ j, Item.Fmt.init(item, tables.ginfo) });
+            const msyms = tables.ginfo.prod_pos_symbols.get(item);
+            const isfinal = msyms == null;
+            if (isfinal) {
+                std.debug.print("isfinal \n", .{});
+                // Enter a reduce action in the follow set columns, .reduce=sym.id
+                // TODO: follow set
+                // for now assume follow set = {$}
+                const colrow: TypedColRow = .{ .col = .{ .id = tables.ginfo.terminalscount, .ty = .term }, .row = @intCast(SymbolId, i) };
+                try tables.putNoClobber(allocator, .action, colrow, .{ .reduce = item.id });
+            } else for (msyms.?.items) |sym| {
+                const nextstateid = stateid + 1;
+                // TODO: final
+                if (sym.ty == .term) {
+                    const colrow: TypedColRow = .{ .col = sym, .row = @intCast(SymbolId, i) };
+                    std.debug.print(
+                        "sym {} colrow {} state {} \n",
+                        .{ TidFmt.init(sym, tables.ginfo), TypedColRow.Fmt.init(colrow, tables.ginfo), nextstateid },
+                    );
+                    // Enter a shift action in row n and column α,
+                    try tables.putNoClobber(allocator, .action, colrow, .shift);
+                    // and enter n′ in the corresponding entry of the goto ts[i].
+                    try tables.putNoClobber(allocator, .goto, colrow, nextstateid);
+                } else {
+                    const colrow: TypedColRow = .{ .col = sym, .row = @intCast(SymbolId, i) };
+                    std.debug.print(
+                        "sym {} colrow {} state {}\n",
+                        .{ TidFmt.init(sym, tables.ginfo), TypedColRow.Fmt.init(colrow, tables.ginfo), nextstateid },
+                    );
+                    // Enter n′ in the goto table for row n and nonterminal A.
+                    try tables.putNoClobber(allocator, .goto, colrow, nextstateid);
+                }
             }
         }
     }
-    displayTable("goto", gototable);
-
-    // move the dotpos cursor through each position for each production
-    // and check for names at that position.
-    // if found, insert ((col, row), stateid) entries into the tables
-    var dotpos: StateId = 0;
-    stateid = 1;
-    outer: while (true) : (dotpos += 1) {
-        for (prods) |prod| {
-            var names = std.StringHashMap(void).init(allocator);
-            defer names.deinit();
-            var pos: StateId = 0;
-            var maxpos: StateId = 0;
-            try getNamesAtPosition(dotpos, prod.rule.root, &names, &pos, &maxpos);
-            if (dotpos == maxpos) {
-                trace("{s}: atmaxpos {}\n", .{ prod.name, maxpos });
-            }
-            var it = names.iterator();
-            while (it.next()) |ent| {
-                const name = ent.key_ptr.*;
-                const id = nameId(name, terminal_ids, nonterminal_ids, terminalscount);
-                trace("{s}:{} dotpos/maxpos {}/{} names {s}\n", .{ prod.name, id, dotpos, maxpos, name });
-            }
-        }
-        if (dotpos == 4) break :outer;
-    }
-
-    return Tables{ .action = actiontable, .goto = gototable };
-}
-
-fn displayTable(tablename: []const u8, table: anytype) void {
-    var it = table.iterator();
-    while (it.next()) |ent|
-        trace("{s} table entry: {}={}\n", .{ tablename, ent.key_ptr.*, ent.value_ptr.* });
-}
-
-fn getClosure(allocator: Allocator, _name: []const u8, prodmap: ProdMap) Error![]const Production {
-    var stack = std.ArrayList([]const u8).init(allocator);
-    defer stack.deinit();
-    try stack.append(_name);
-
-    var result = std.ArrayList(Production).init(allocator);
-    while (stack.popOrNull()) |name| {
-        if (prodmap.get(name)) |prod| {
-            const found = for (result.items) |it| {
-                if (mem.eql(u8, it.name, prod.name)) break true;
-            } else false;
-            if (found) continue;
-            try result.append(prod);
-            var names = std.StringHashMap(void).init(allocator);
-            defer names.deinit();
-            var pos: u8 = 0;
-            try getNamesAtPosition(0, prod.rule.root, &names, &pos, null);
-            var it = names.iterator();
-            while (it.next()) |ent| try stack.append(ent.key_ptr.*);
-        }
-    }
-    return result.toOwnedSlice();
-}
-
-fn getNamesAtPosition(dotpos: u8, sym: Symbol, names: *std.StringHashMap(void), pos: *u8, mmaxpos: ?*u8) Error!void {
-    if (mmaxpos) |maxpos| maxpos.* = std.math.max(maxpos.*, pos.*);
-    switch (sym) {
-        .char_lit, .str_lit, .sqbkt_lit, .name => |s| if (pos.* == dotpos) try names.put(s, {}),
-        .optional, .some, .many, .not => |s| {
-            try getNamesAtPosition(dotpos, s.*, names, pos, mmaxpos);
-        },
-        .seq, .group => |ss| for (ss) |s, i| {
-            var pos2 = pos.* + @intCast(u8, i);
-            try getNamesAtPosition(dotpos, s, names, &pos2, mmaxpos);
-        },
-        .choice => |ss| for (ss) |s| {
-            try getNamesAtPosition(dotpos, s, names, pos, mmaxpos);
-        },
-        else => unreachable,
-    }
-}
-
-fn getFirstNameOf(allocator: Allocator, prod: Production) ![]const u8 {
-    var names = std.StringHashMap(void).init(allocator);
-    defer names.deinit();
-    var pos: u8 = 0;
-    try getNamesAtPosition(0, prod.rule.root, &names, &pos, null);
-    trace("getFirstNameOf {s} names.count() {}\n", .{ prod.name, names.count() });
-    var it = names.iterator();
-    return if (names.count() == 1) it.next().?.key_ptr.* else error.NamesCountNotEqOne;
+    return tables;
 }
