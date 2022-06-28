@@ -664,43 +664,43 @@ pub const TypedSymbolId = struct {
 
 pub const GrammarInfo = struct {
     grammar: std.ArrayListUnmanaged(Production) = .{},
-    names_to_syms: NameTypedSymbolsMap = .{},
-    syms_to_names: TypedSymbolNamesMap = .{},
-    prod_pos_symbols: ProdPosTypedSymbolsMap = .{},
-    symbol_prod_pos: TypedSymbolProdPosMap = .{},
+    name_sym: NameSymbolMap = .{},
+    sym_name: SymbolNameMap = .{},
+    item_syms: ItemSymbolsMap = .{},
+    sym_items: SymbolItemsMap = .{},
     terminalscount: SymbolId = 0,
     nonterminalscount: SymbolId = 0,
 
-    pub const NameTypedSymbolsMap = std.StringArrayHashMapUnmanaged(TypedSymbolId);
-    pub const TypedSymbolNamesMap = std.AutoArrayHashMapUnmanaged(TypedSymbolId, []const u8);
-    const TypedSymbolsList = std.ArrayListUnmanaged(TypedSymbolId);
-    const ProdPosTypedSymbolsMap = std.AutoArrayHashMapUnmanaged(Item, TypedSymbolsList);
-    const TypedSymbolProdPosMap = std.AutoArrayHashMapUnmanaged(TypedSymbolId, ItemSet);
+    pub const NameSymbolMap = std.StringArrayHashMapUnmanaged(TypedSymbolId);
+    pub const SymbolNameMap = std.AutoArrayHashMapUnmanaged(TypedSymbolId, []const u8);
+    const SymbolList = std.ArrayListUnmanaged(TypedSymbolId);
+    const ItemSymbolsMap = std.AutoArrayHashMapUnmanaged(Item, SymbolList);
+    const SymbolItemsMap = std.AutoArrayHashMapUnmanaged(TypedSymbolId, ItemSet);
 
     pub fn init(allocator: Allocator, grammar: []const Production) !GrammarInfo {
         var result: GrammarInfo = .{};
-        try result.addToGrammar(allocator, grammar);
+        try result.addProductions(allocator, grammar);
         return result;
     }
 
     pub fn deinit(self: *GrammarInfo, allocator: Allocator) void {
-        self.names_to_syms.deinit(allocator);
-        self.syms_to_names.deinit(allocator);
+        self.name_sym.deinit(allocator);
+        self.sym_name.deinit(allocator);
         self.grammar.deinit(allocator);
-        for (self.prod_pos_symbols.values()) |*list| list.deinit(allocator);
-        self.prod_pos_symbols.deinit(allocator);
-        for (self.symbol_prod_pos.values()) |*list| list.deinit(allocator);
-        self.symbol_prod_pos.deinit(allocator);
+        for (self.item_syms.values()) |*list| list.deinit(allocator);
+        self.item_syms.deinit(allocator);
+        for (self.sym_items.values()) |*list| list.deinit(allocator);
+        self.sym_items.deinit(allocator);
     }
 
     fn nonterminalscountCheck(self: GrammarInfo) SymbolId {
         var result: SymbolId = 0;
-        for (self.names_to_syms.values()) |s| result += @boolToInt(s.ty == .nonterm);
+        for (self.name_sym.values()) |s| result += @boolToInt(s.ty == .nonterm);
         return result;
     }
     fn terminalscountCheck(self: GrammarInfo) SymbolId {
         var result: SymbolId = 0;
-        for (self.names_to_syms.values()) |s| result += @boolToInt(s.ty == .term);
+        for (self.name_sym.values()) |s| result += @boolToInt(s.ty == .term);
         return result;
     }
 
@@ -711,7 +711,7 @@ pub const GrammarInfo = struct {
             .char_lit, .str_lit, .sqbkt_lit => |s| {
                 trace("lit {s}\n", .{s});
                 var id = TypedSymbolId.init(self.terminalscount, .term);
-                const gop = try self.names_to_syms.getOrPut(allocator, s);
+                const gop = try self.name_sym.getOrPut(allocator, s);
                 if (gop.found_existing) id = gop.value_ptr.* else gop.value_ptr.* = id;
                 try self.addProdPosSym(allocator, id, prodid, pos);
                 self.terminalscount += @boolToInt(!gop.found_existing);
@@ -719,7 +719,7 @@ pub const GrammarInfo = struct {
             .name => |s| {
                 trace("name {s}\n", .{s});
                 var id = TypedSymbolId.init(self.nonterminalscount, .nonterm);
-                const gop = try self.names_to_syms.getOrPut(allocator, s);
+                const gop = try self.name_sym.getOrPut(allocator, s);
                 if (gop.found_existing) id = gop.value_ptr.* else gop.value_ptr.* = id;
                 try self.addProdPosSym(allocator, id, prodid, pos);
                 self.nonterminalscount += @boolToInt(!gop.found_existing);
@@ -740,63 +740,60 @@ pub const GrammarInfo = struct {
     fn addProdPosSym(self: *GrammarInfo, allocator: Allocator, id: TypedSymbolId, prodid: u16, pos: u16) !void {
         trace("addProdPosSym() id {} prodid {} pos {}\n", .{ id.id, prodid, pos });
         {
-            const gop = try self.prod_pos_symbols.getOrPut(allocator, Item.init(prodid, pos));
+            const gop = try self.item_syms.getOrPut(allocator, Item.init(prodid, pos));
             if (!gop.found_existing) gop.value_ptr.* = .{};
             try gop.value_ptr.*.append(allocator, id);
         }
         {
-            const gop = try self.symbol_prod_pos.getOrPut(allocator, id);
+            const gop = try self.sym_items.getOrPut(allocator, id);
             if (!gop.found_existing) gop.value_ptr.* = .{};
             try gop.value_ptr.*.append(allocator, Item.init(prodid, pos));
         }
     }
 
-    pub fn addToGrammar(self: *GrammarInfo, allocator: Allocator, grammar: []const Production) !void {
-        for (grammar) |prod, _prodid| {
-            const id = TypedSymbolId.init(self.nonterminalscount, .nonterm);
-            // TODO: check for duplicate production names somewhere
+    pub fn addProductions(self: *GrammarInfo, allocator: Allocator, grammar: []const Production) !void {
+        for (grammar) |prod| {
+            var id = TypedSymbolId.init(self.nonterminalscount, .nonterm);
             {
-                const gop = try self.names_to_syms.getOrPut(allocator, prod.name);
-                if (!gop.found_existing) gop.value_ptr.* = id;
+                const gop = try self.name_sym.getOrPut(allocator, prod.name);
+                if (gop.found_existing) id = gop.value_ptr.* else gop.value_ptr.* = id;
                 self.nonterminalscount += @boolToInt(!gop.found_existing);
             }
-            const prodid = @intCast(u16, _prodid + self.grammar.items.len);
-
             var maxpos: u16 = 0;
-            try self.populateIdTables(allocator, prod.rule.root, 0, &maxpos, prodid);
-            trace("-- '{s}' prodid {} terms {} nonterms {} maxpos {}\n", .{ prod.name, prodid, self.terminalscount, self.nonterminalscount, maxpos });
+            try self.populateIdTables(allocator, prod.rule.root, 0, &maxpos, id.id);
+            trace("-- '{s}' prodid {} terms {} nonterms {} maxpos {}\n", .{ prod.name, id.id, self.terminalscount, self.nonterminalscount, maxpos });
         }
 
-        var it = self.names_to_syms.iterator();
+        var it = self.name_sym.iterator();
         while (it.next()) |e| {
-            const gop = try self.syms_to_names.getOrPut(allocator, e.value_ptr.*);
+            const gop = try self.sym_name.getOrPut(allocator, e.value_ptr.*);
             if (!gop.found_existing) gop.value_ptr.* = e.key_ptr.*;
         }
         try self.grammar.appendSlice(allocator, grammar);
 
         trace("glen {} ppslen {} nonterms/terms {}/{} total names/syms {}/{}\n", .{
             self.grammar.items.len,
-            self.prod_pos_symbols.count(),
+            self.item_syms.count(),
             self.nonterminalscount,
             self.terminalscount,
-            self.names_to_syms.count(),
-            self.syms_to_names.count(),
+            self.name_sym.count(),
+            self.sym_name.count(),
         });
-        assert(self.nonterminalscount + self.terminalscount == self.names_to_syms.count());
-        assert(self.names_to_syms.count() == self.syms_to_names.count());
+        assert(self.nonterminalscount + self.terminalscount == self.name_sym.count());
+        assert(self.name_sym.count() == self.sym_name.count());
 
         assert(self.terminalscount == self.terminalscountCheck());
         assert(self.nonterminalscount == self.nonterminalscountCheck());
     }
 
     pub fn idToName(ginfo: GrammarInfo, tid: TypedSymbolId) ?[]const u8 {
-        return ginfo.syms_to_names.get(tid);
+        return ginfo.sym_name.get(tid);
     }
     pub fn nameToTid(ginfo: GrammarInfo, name: []const u8) ?TypedSymbolId {
-        return ginfo.names_to_syms.get(name);
+        return ginfo.name_sym.get(name);
     }
     // pub fn nameToSymbolId(ginfo: GrammarInfo, name: []const u8) ?SymbolId {
-    //     return if (ginfo.names_to_syms.get(name)) |tid| tid.adjustedId(ginfo) else null;
+    //     return if (ginfo.name_sym.get(name)) |tid| tid.adjustedId(ginfo) else null;
     // }
     pub fn nameToProdId(ginfo: GrammarInfo, name: []const u8) ?SymbolId {
         for (ginfo.grammar.items) |prod, i| {
@@ -872,7 +869,7 @@ pub const Item = struct {
                 var wrotedot = false;
                 // const dot: []const u8 = &[_]u8{ 250, ' ' };
                 const dot: []const u8 = &[_]u8{ '.', ' ' };
-                while (self.ginfo.prod_pos_symbols.get(.{ .id = id, .pos = dotpos })) |tids| : (dotpos += 1) {
+                while (self.ginfo.item_syms.get(.{ .id = id, .pos = dotpos })) |tids| : (dotpos += 1) {
                     if (self.item.pos == dotpos) {
                         _ = try writer.write(dot);
                         wrotedot = true;
@@ -991,7 +988,7 @@ pub fn closure(allocator: Allocator, I: ItemSet, ginfo: GrammarInfo) !ItemSet {
         // std.debug.print("J.count() {}\n", .{J.count()});
         for (J.keys()) |item| { // NOTE: segfault here if AutoArrayHashMapUnmanaged is used
             // trace("  item {}\n", .{Item.Fmt.init(item, ginfo)});
-            const Bs = ginfo.prod_pos_symbols.get(item) orelse continue;
+            const Bs = ginfo.item_syms.get(item) orelse continue;
             // trace("Bs {s}\n", .{TidsFmt.init(Bs.items, ginfo)});
             for (Bs.items) |b| {
                 if (b.ty == .term) continue;
@@ -1025,7 +1022,7 @@ pub fn goto(allocator: Allocator, I: ItemSet, X: TypedSymbolId, ginfo: GrammarIn
     // lookup X by id to get [(prod, pos)]
     // var X_ = X;
     // X_.ty.remove(.final);
-    const mprodposlist = ginfo.symbol_prod_pos.get(X);
+    const mprodposlist = ginfo.sym_items.get(X);
     const prodposlist = if (mprodposlist) |l| l else ItemSet{};
     // trace("prodposlist {any}\n", .{ItemSetFmt.init(prodposlist, ginfo)});
     for (prodposlist.items) |prodpos| {
@@ -1055,7 +1052,7 @@ pub fn lr0items(allr: Allocator, set0: ItemSet, ginfo: GrammarInfo) !ItemSetList
             defer next.deinit(allr);
             // trace("  I: {}\n", .{ItemSetFmt.init(I, ginfo)});
             // trace("  I: {any}\n", .{I.items});
-            for (ginfo.syms_to_names.keys()) |X| {
+            for (ginfo.sym_name.keys()) |X| {
                 var G = try goto(allr, I, X, ginfo);
                 // trace("    G: {}\n", .{ItemSetFmt.init(G, ginfo)});
                 // trace("    G: {any}\n", .{G.items});
@@ -1229,7 +1226,7 @@ pub fn createTables(allocator: Allocator, _ginfo: GrammarInfo, augmented_start: 
         parseFree(allocator, augmentedstart);
         auginfo.deinit(allocator);
     }
-    try tables.ginfo.addToGrammar(allocator, auginfo.grammar.items);
+    try tables.ginfo.addProductions(allocator, auginfo.grammar.items);
     var set0 = try auginfo.itemSetUsing(allocator, tables.ginfo, 0);
     var itemsets = try lr0items(allocator, set0, tables.ginfo);
     defer {
@@ -1252,7 +1249,7 @@ pub fn createTables(allocator: Allocator, _ginfo: GrammarInfo, augmented_start: 
                 break :blk seencount;
             };
             std.debug.print("item-{} {}\n", .{ j, Item.Fmt.init(item, tables.ginfo) });
-            const msyms = tables.ginfo.prod_pos_symbols.get(item);
+            const msyms = tables.ginfo.item_syms.get(item);
             const isfinal = msyms == null;
             if (isfinal) {
                 std.debug.print("isfinal \n", .{});

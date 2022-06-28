@@ -160,7 +160,7 @@ test "closure" {
 
     var augmentedstart = try bnf.parseGrammar(allr, t.failing_allocator, "S' <- S");
     var auginfo = try bnf.GrammarInfo.init(allr, augmentedstart);
-    try ginfo.addToGrammar(allr, augmentedstart);
+    try ginfo.addProductions(allr, augmentedstart);
     for (ginfo.grammar.items) |it|
         std.debug.print("{s} <- {}\n", .{ it.name, it.rule.root });
 
@@ -193,7 +193,7 @@ test "goto1" {
     var auginfo = try bnf.GrammarInfo.init(allr, augmentedstart);
     var prods = try bnf.parseGrammar(allr, t.failing_allocator, src);
     var ginfo = try bnf.GrammarInfo.init(allr, prods);
-    try ginfo.addToGrammar(allr, augmentedstart);
+    try ginfo.addProductions(allr, augmentedstart);
 
     var set0 = try ginfo.itemSetFromNames(allr, &.{ "E'", "E" }, 0);
     // std.debug.print("set0 {}\n", .{ItemSetFmt.init(set0, ginfo)});
@@ -223,7 +223,7 @@ test "goto2" {
     var auginfo = try bnf.GrammarInfo.init(allr, augmentedstart);
     var prods = try bnf.parseGrammar(allr, t.failing_allocator, src);
     var ginfo = try bnf.GrammarInfo.init(allr, prods);
-    try ginfo.addToGrammar(allr, augmentedstart);
+    try ginfo.addProductions(allr, augmentedstart);
 
     var set0 = try ginfo.itemSetFromNames(allr, &.{"S"}, 0);
 
@@ -251,7 +251,7 @@ test "lr0items" {
     var augmentedstart = try bnf.parseGrammar(allr, t.failing_allocator, "S' <- S");
     var prods = try bnf.parseGrammar(allr, t.failing_allocator, src);
     var ginfo = try bnf.GrammarInfo.init(allr, prods);
-    try ginfo.addToGrammar(allr, augmentedstart);
+    try ginfo.addProductions(allr, augmentedstart);
     defer {
         bnf.parseFree(allr, augmentedstart);
         bnf.parseFree(allr, prods);
@@ -317,7 +317,7 @@ test "createTables" {
 
     {
         std.debug.print("symbols\n", .{});
-        for (ginfo.names_to_syms.keys()) |name| {
+        for (ginfo.name_sym.keys()) |name| {
             std.debug.print("{s}-{}\n", .{ name, bnf.TidFmt.init(ginfo.nameToTid(name).?, ginfo) });
         }
     }
@@ -342,6 +342,24 @@ test "createTables" {
     defer {
         tables.deinit(allr);
     }
+}
+
+test "duplicate production names" {
+    const src = @embedFile("../samples/factor2.bnf");
+    var prods = try bnf.parseGrammar(allr, t.failing_allocator, src);
+    var ginfo = try bnf.GrammarInfo.init(allr, prods);
+    defer {
+        bnf.parseFree(allr, prods);
+        ginfo.deinit(allr);
+    }
+
+    try t.expectEqual(@as(usize, 6), prods.len);
+    const Etid = ginfo.nameToTid("E").?;
+    const E0syms = ginfo.item_syms.get(.{ .id = Etid.id, .pos = 0 });
+    try t.expect(E0syms != null);
+    try t.expectEqual(@as(usize, 2), E0syms.?.items.len);
+    try t.expectEqual(Etid, E0syms.?.items[0]);
+    try t.expectEqual(ginfo.nameToTid("T").?, E0syms.?.items[1]);
 }
 
 // test "json" {
