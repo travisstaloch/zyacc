@@ -7,19 +7,19 @@
 
 S   <- D / S1
 S1  <- lf S
-D   <- Id "<-" Choice L
+D   <- id "<-" Choice L
 
-L   <- L2 / Empty
+L   <- L2 / empty
 L2  <- lf L3
 L3  <- L / D
 
 Choice   <- Seq Choice1
-Choice1  <- Empty / Choice1a
+Choice1  <- empty / Choice1a
 Choice1a <- "/" Choice
 
 Seq   <- Seq1 Seq2
-Seq1  <- Id / QuotedStringToken
-Seq2  <- Empty / Seq
+Seq1  <- id / QuotedStringToken
+Seq2  <- empty / Seq
 
 
 # Original from https://www.clear.rice.edu/comp405/s16/lectures/parsing/parse_bnf.html

@@ -1,0 +1,14 @@
+# syntax compatible w/ grammaphone website
+
+S   -> D | S1 .
+S1  -> lf S .
+D   -> id "<-" Choice L .
+L   -> L2 | empty .
+L2  -> lf L3 .
+L3  -> L | D .
+Choice   -> Seq Choice1 .
+Choice1  -> empty | Choice1a .
+Choice1a -> "/" Choice .
+Seq   -> Seq1 Seq2 .
+Seq1  -> id | QuotedStringToken .
+Seq2  -> empty | Seq .
