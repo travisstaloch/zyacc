@@ -246,6 +246,49 @@ test "goto2" {
     try t.expectEqual(Item.init(ginfo.nameToTid("E").?.id, 3), g.items[2]);
 }
 
+test "goto3" {
+    const src = @embedFile("../samples/factor.bnf");
+    var augmentedstart = try bnf.parseGrammar(allr, t.failing_allocator, "E' <- E");
+    var auginfo = try bnf.GrammarInfo.init(allr, augmentedstart);
+    var prods = try bnf.parseGrammar(allr, t.failing_allocator, src);
+    var ginfo = try bnf.GrammarInfo.init(allr, prods);
+    try ginfo.addProductions(allr, augmentedstart);
+
+    // var set0 = try ginfo.itemSetFromNames(allr, &.{"E'"}, 0);
+    var set0 = try auginfo.itemSetUsing(allr, ginfo, 0);
+    var itemsets = try bnf.lr0items(allr, set0, ginfo);
+
+    defer {
+        ginfo.deinit(allr);
+        bnf.parseFree(allr, prods);
+        bnf.parseFree(allr, augmentedstart);
+        auginfo.deinit(allr);
+        set0.deinit(allr);
+        for (itemsets.items) |*i| i.deinit(allr);
+        itemsets.deinit(allr);
+    }
+    // for (itemsets.items[0..1]) |itemset, i|
+    // std.debug.print("itemset-{} {}\n", .{i, ItemSetFmt.init(itemset, ginfo)});
+
+    {
+        const itemset = itemsets.items[0];
+        try t.expectEqual(@as(usize, 4), itemset.items.len);
+        try t.expectEqual(Item.init(ginfo.nameToTid("E'").?.id, 0), itemset.items[0]);
+        try t.expectEqual(Item.init(ginfo.nameToTid("E").?.id, 0), itemset.items[1]);
+        try t.expectEqual(Item.init(ginfo.nameToTid("T").?.id, 0), itemset.items[2]);
+        try t.expectEqual(Item.init(ginfo.nameToTid("F").?.id, 0), itemset.items[3]);
+    }
+    {
+        const i = 1;
+        const itemset = itemsets.items[i];
+        for (itemset.items) |it, j|
+            std.debug.print("it-{}-{} {}\n", .{ i, j, Item.Fmt.init(it, ginfo) });
+        try t.expectEqual(@as(usize, 2), itemset.items.len);
+        try t.expectEqual(Item.init(ginfo.nameToTid("E'").?.id, 1), itemset.items[0]);
+        try t.expectEqual(Item.init(ginfo.nameToTid("E").?.id, 1), itemset.items[1]);
+    }
+}
+
 test "lr0items" {
     const src = @embedFile("../samples/xz.bnf");
     var augmentedstart = try bnf.parseGrammar(allr, t.failing_allocator, "S' <- S");
@@ -302,16 +345,68 @@ test "lr0items" {
     );
 }
 
+test "first" {
+    const src = @embedFile("../samples/cd.bnf");
+    var prods = try bnf.parseGrammar(allr, t.failing_allocator, src);
+    var ginfo = try bnf.GrammarInfo.init(allr, prods);
+    var firstsS = try ginfo.first(allr, .{ .id = ginfo.nameToProdId("S").?, .pos = 0 });
+    var firstsC = try ginfo.first(allr, .{ .id = ginfo.nameToProdId("C").?, .pos = 0 });
+    defer {
+        bnf.parseFree(allr, prods);
+        ginfo.deinit(allr);
+        firstsS.deinit(allr);
+        firstsC.deinit(allr);
+    }
+    try t.expectEqual(@as(usize, 2), firstsS.items.len);
+    try t.expectEqual(bnf.Item{ .id = ginfo.nameToTid("c").?.id, .pos = 0 }, firstsS.items[0]);
+    try t.expectEqual(bnf.Item{ .id = ginfo.nameToTid("d").?.id, .pos = 0 }, firstsS.items[1]);
+    try t.expectEqual(@as(usize, 2), firstsC.items.len);
+    try t.expectEqual(bnf.Item{ .id = ginfo.nameToTid("c").?.id, .pos = 0 }, firstsC.items[0]);
+    try t.expectEqual(bnf.Item{ .id = ginfo.nameToTid("d").?.id, .pos = 0 }, firstsC.items[1]);
+}
+
+test "follow sets" {
+    const src = @embedFile("../samples/cd.bnf");
+    var prods = try bnf.parseGrammar(allr, t.failing_allocator, src);
+    var ginfo = try bnf.GrammarInfo.init(allr, prods);
+    var followsS = ginfo.follow(ginfo.nameToProdId("S").?);
+    var followsC = ginfo.follow(ginfo.nameToProdId("C").?);
+    defer {
+        bnf.parseFree(allr, prods);
+        ginfo.deinit(allr);
+    }
+    try t.expectEqual(@as(usize, 3), followsC.len);
+    try t.expect(std.mem.indexOfScalar(bnf.SymbolId, followsC, ginfo.end) != null);
+    try t.expect(std.mem.indexOfScalar(bnf.SymbolId, followsC, ginfo.nameToTid("c").?.id) != null);
+    try t.expect(std.mem.indexOfScalar(bnf.SymbolId, followsC, ginfo.nameToTid("d").?.id) != null);
+
+    try t.expectEqual(@as(usize, 1), followsS.len);
+    try t.expect(std.mem.indexOfScalar(bnf.SymbolId, followsS, ginfo.end) != null);
+}
+
+test "start" {
+    const src = @embedFile("../samples/cd.bnf");
+    var prods = try bnf.parseGrammar(allr, t.failing_allocator, src);
+    var ginfo = try bnf.GrammarInfo.init(allr, prods);
+    var start = try ginfo.start(allr);
+
+    defer {
+        bnf.parseFree(allr, prods);
+        ginfo.deinit(allr);
+    }
+    try t.expectEqual(@as(u16, 0), start);
+}
+
+const Action = bnf.SLRTables.Action;
+
 test "createTables" {
     const src = @embedFile("../samples/cd.bnf");
     var prods = try bnf.parseGrammar(allr, t.failing_allocator, src);
 
     var ginfo = try bnf.GrammarInfo.init(allr, prods);
 
-    defer {
-        bnf.parseFree(allr, prods);
-        ginfo.deinit(allr);
-    }
+    defer bnf.parseFree(allr, prods);
+
     var tables = try bnf.createTables(allr, ginfo, "S' <- S");
     var writer = std.io.getStdErr().writer();
 
@@ -343,70 +438,44 @@ test "createTables" {
     defer {
         tables.deinit(allr);
     }
-    // const Stid = ginfo.nameToTid("S").?;
-    // const Ctid = ginfo.nameToTid("C").?;
-    // const ctid = ginfo.nameToTid("c").?;
-    // const dtid = ginfo.nameToTid("d").?;
-
-    // const gS0 = tables.gotos.get(.{ .col = Stid, .row = 0 });
-    // try t.expect(gS0 != null);
-    // try t.expectEqual(@as(bnf.SymbolId, 1), gS0.?);
-
-    // const gC0 = tables.gotos.get(.{ .col = Ctid, .row = 0 });
-    // try t.expect(gC0 != null);
-    // try t.expectEqual(@as(bnf.SymbolId, 2), gC0.?);
-
-    // const ac0 = tables.actions.get(.{ .col = ctid, .row = 0 });
-    // try t.expect(ac0 != null);
-    // try t.expectEqual(bnf.Action{ .shift = 3 }, ac0.?);
-
-    // const ad0 = tables.actions.get(.{ .col = dtid, .row = 0 });
-    // try t.expect(ad0 != null);
-    // try t.expectEqual(bnf.Action{ .shift = 4 }, ad0.?);
-
-    // const a_1 = tables.actions.get(.{ .col = .{ .id = ginfo.terminalscount, .ty = .term }, .row = 1 });
-    // try t.expect(a_1 != null);
-    // try t.expectEqual(bnf.Action{ .reduce = 2 }, a_1.?); // FIXME: 2 is incorrect
-
-    // const gC2 = tables.gotos.get(.{ .col = Ctid, .row = 2 });
-    // try t.expect(gC2 != null);
-    // try t.expectEqual(@as(bnf.SymbolId, 5), gC2.?);
-
-    // const ac2 = tables.actions.get(.{ .col = ctid, .row = 2 });
-    // try t.expect(ac2 != null);
-    // try t.expectEqual(bnf.Action{ .shift = 6 }, ac2.?);
     const src2 =
+        \\S' -> S .
         \\S -> C C .
         \\C -> c C | d .
     ;
     _ = src2;
-    // TODO: parse this structure
-    // TODO: change this structure to use entries rather than csv
-    //       so each entry would be an index data pair
-    //       this will prevent errors related to forgetting/adding extra comma
     const rows =
-        \\s3, s4, 1, 2
-        \\a, a, ,
-        \\s3, s4, , 5
-        \\s3, s4, , 6
-        // FIXME: need to either break all productions for each choice so that they can be numbered
-        //        or represent reductions as [(prodid, choiceid, choicenum)]
-        \\rCd, rCd, ,
-        \\rS, rS, ,
-        \\rCc, rCc, ,
+        \\c-s3, d-s4, S-1, C-2
+        \\$-$a
+        \\c-s3, d-s4, C-5
+        \\c-s3, d-s4, C-6
+        \\c-rC:1, d-rC:1, $-rC:1
+        \\$-rS:0
+        \\c-rC:0, d-rC:0, $-rC:0
     ;
-    _ = rows;
-    var tblexpected: bnf.SLRTables = .{ .ginfo = ginfo };
-    _ = tblexpected;
-    var linesit = std.mem.split(u8, rows, "\n");
-    while (linesit.next()) |line| {
-        var it = std.mem.split(u8, line, ",");
-        var col: u8 = 0;
-        while (it.next()) |ent| : (col += 1) {
-            const trimmedent = std.mem.trim(u8, ent, &std.ascii.spaces);
-            std.debug.print("'{s}',", .{trimmedent});
-        }
-        std.debug.print("\n", .{});
+
+    const rows2 =
+        \\S'-s1, S-s2, C-s3, c-s4, d-s5, 
+        \\$-$a, 
+        \\$-r0, 
+        \\C-s6, c-s4, d-s5, 
+        \\C-s7, c-s4, d-s5, 
+        \\c-r3, d-r3, $-r3, 
+        \\$-r1, 
+        \\c-r2, d-r2, $-r2, 
+    ;
+    _ = rows2;
+    var tablesexpected = try bnf.SLRTables.parseTables(allr, t.failing_allocator, rows, ginfo);
+    defer tablesexpected.deinit(allr);
+
+    var ait = tablesexpected.actions.iterator();
+    while (ait.next()) |ent| {
+        const contains = tables.actions.contains(ent.key_ptr.*);
+        if (!contains)
+            std.debug.print("action missing {}\n", .{bnf.SLRTables.Entry.Fmt.init(ent.key_ptr.*, ginfo)})
+        else
+            std.debug.print("action present {}\n", .{bnf.SLRTables.Entry.Fmt.init(ent.key_ptr.*, ginfo)});
+        try t.expect(contains);
     }
 }
 
@@ -426,6 +495,48 @@ test "duplicate production names" {
     try t.expectEqual(@as(usize, 2), E0syms.?.items.len);
     try t.expectEqual(Etid, E0syms.?.items[0]);
     try t.expectEqual(ginfo.nameToTid("T").?, E0syms.?.items[1]);
+}
+
+test "parse table" {
+    const src = @embedFile("../samples/bnf.grammar");
+    var grammar = try bnf.parseGrammar(allr, t.failing_allocator, src);
+    defer bnf.parseFree(allr, grammar);
+    const ginfo = try bnf.GrammarInfo.init(allr, grammar);
+
+    const tablesrc =
+        \\S-s1, D-s2, S1-s3, id-s4, lf-s5, 
+        \\$-$a, 
+        \\$-r0, 
+        \\$-r1, 
+        \\"<-"-s6, 
+        \\S-s7, D-s2, S1-s3, id-s4, lf-s5, 
+        \\Choice-s8, Seq-s9, Seq1-s10, id-s11, QuotedStringToken-s12, 
+        \\$-r2, 
+        \\L-s13, L2-s14, empty-s15, lf-s16, 
+        \\Choice1-s17, empty-s18, Choice1a-s19, "/"-s20, 
+        \\Seq2-s21, empty-s22, Seq-s23, Seq1-s10, id-s11, QuotedStringToken-s12, 
+        \\empty-r14, id-r14, QuotedStringToken-r14, 
+        \\empty-r15, id-r15, QuotedStringToken-r15, 
+        \\$-r3, 
+        \\$-r4, 
+        \\$-r5, 
+        \\L3-s24, L-s25, D-s26, L2-s14, empty-s15, id-s4, lf-s16, 
+        \\empty-r9, lf-r9, 
+        \\empty-r10, lf-r10, 
+        \\empty-r11, lf-r11, 
+        \\Choice-s27, Seq-s9, Seq1-s10, id-s11, QuotedStringToken-s12, 
+        \\empty-r13, "/"-r13, 
+        \\empty-r16, "/"-r16, 
+        \\empty-r17, "/"-r17, 
+        \\$-r6, 
+        \\$-r7, 
+        \\$-r8, 
+        \\empty-r12, lf-r12, 
+    ;
+    var tables = try bnf.SLRTables.parseTables(allr, t.failing_allocator, tablesrc, ginfo);
+    defer tables.deinit(allr);
+
+    try tables.display(std.io.getStdErr().writer(), 5);
 }
 
 // test "json" {
