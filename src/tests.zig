@@ -1,11 +1,11 @@
 const std = @import("std");
-const g = @import("grammophone.zig");
+const g = @import("main.zig");
 const assert = std.debug.assert;
 const t = std.testing;
-const allr = t.allocator;
+// const allr = t.allocator;
 const fallr = t.failing_allocator;
-// var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-// const allr = arena.allocator();
+var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+const allr = arena.allocator();
 
 test "tokenize" {
     // const src = @embedFile("../samples/zig.grammar");
