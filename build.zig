@@ -15,7 +15,7 @@ pub fn build(b: *std.build.Builder) void {
     main_tests.setBuildMode(mode);
 
     var filter: []const u8 = "";
-    // filter = "tokenize";
+    // filter = "tokenize zig";
     main_tests.filter = filter;
 
     const test_step = b.step("test", "Run library tests");

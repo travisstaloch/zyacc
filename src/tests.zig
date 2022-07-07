@@ -29,40 +29,85 @@ test "tokenize" {
         // skip container_doc_comment? ContainerMembers eof
         const prod = productions.items[0];
         try t.expectEqualStrings("Root", grammar.name(prod.name.id).?);
-        try t.expectEqual(@as(usize, 5), prod.rule.items.len);
-        try t.expectEqualStrings("skip", grammar.name(prod.rule.items[0].sym.token.id).?);
-        try t.expectEqualStrings("eof", grammar.name(prod.rule.items[3].sym.token.id).?);
+        try t.expectEqual(@as(usize, 5), prod.rule.len);
+        try t.expectEqualStrings("skip", grammar.name(prod.rule[0].sym.token.id).?);
+        try t.expectEqualStrings("eof", grammar.name(prod.rule[3].sym.token.id).?);
         const expected_tags: []const g.Token.Tag = &.{ .name, .name, .name, .name, .comment };
-        try t.expectEqual(expected_tags.len, prod.rule.items.len);
-        for (prod.rule.items) |tok, i| {
+        try t.expectEqual(expected_tags.len, prod.rule.len);
+        for (prod.rule) |tok, i| {
             if (i < expected_tags.len)
                 try t.expectEqual(expected_tags[i], tok.sym.token.tag);
         }
-        try t.expect(prod.rule.items[1].flags.contains(.optional));
+        try t.expect(prod.rule[1].flags.contains(.optional));
     }
     {
         // ContainerDeclarations (ContainerField COMMA)* (ContainerField / ContainerDeclarations)
         const prod = productions.items[1];
-        try t.expectEqual(@as(usize, 3), prod.rule.items.len);
-        try t.expectEqual(g.Symbol.Sym.Tag.token, prod.rule.items[0].sym);
-        try t.expectEqual(g.Token.Tag.name, prod.rule.items[0].sym.token.tag);
+        try t.expectEqual(@as(usize, 3), prod.rule.len);
+        try t.expectEqual(g.Symbol.Sym.Tag.token, prod.rule[0].sym);
+        try t.expectEqual(g.Token.Tag.name, prod.rule[0].sym.token.tag);
 
-        try t.expectEqual(g.Symbol.Sym.Tag.group, prod.rule.items[1].sym);
-        try t.expectEqual(@as(usize, 2), prod.rule.items[1].sym.group.items.len);
-        try t.expect(prod.rule.items[1].flags.contains(.many));
+        try t.expectEqual(g.Symbol.Sym.Tag.group, prod.rule[1].sym);
+        try t.expectEqual(@as(usize, 2), prod.rule[1].sym.group.items.len);
+        try t.expect(prod.rule[1].flags.contains(.many));
 
-        try t.expectEqual(g.Symbol.Sym.Tag.group, prod.rule.items[2].sym);
-        // std.debug.print("{}\n", .{prod.rule.items[2].sym.group.items[0].sym});
-        try t.expectEqual(@as(usize, 1), prod.rule.items[2].sym.group.items.len);
+        try t.expectEqual(g.Symbol.Sym.Tag.group, prod.rule[2].sym);
+        // std.debug.print("{}\n", .{prod.rule[2].sym.group.items[0].sym});
+        try t.expectEqual(@as(usize, 1), prod.rule[2].sym.group.items.len);
     }
     {
         // KEYWORD_align / KEYWORD_allowzero / KEYWORD_and / KEYWORD_anyframe
         var i: usize = 2;
         while (i < 6) : (i += 1) {
             const prod = productions.items[i];
-            try t.expectEqual(@as(usize, 1), prod.rule.items.len);
+            try t.expectEqual(@as(usize, 1), prod.rule.len);
         }
     }
+}
+
+test "tokenize zig" {
+    const src = @embedFile("../samples/zig.bnf");
+    var grammar = try g.Grammar.init(allr, fallr, src);
+    defer grammar.deinit(allr);
+
+    // for (grammar.productions.items) |prod| std.debug.print("{}\n", .{g.Production.Fmt.init(prod, grammar)});
+}
+
+test "tokenize nested groups 1" {
+    const src =
+        \\X <- (B / C)
+    ;
+    var grammar = try g.Grammar.init(allr, fallr, src);
+    defer grammar.deinit(allr);
+
+    const productions = grammar.productions;
+    try t.expectEqual(@as(usize, 1), productions.items.len);
+    try t.expectEqual(@as(usize, 1), productions.items[0].rule.len);
+    try t.expectEqual(g.Symbol.Sym.Tag.group, productions.items[0].rule[0].sym);
+    try t.expectEqual(@as(usize, 1), productions.items[0].rule[0].sym.group.items.len);
+    try t.expectEqual(g.Symbol.Sym.Tag.choice, productions.items[0].rule[0].sym.group.items[0].sym);
+    try t.expectEqual(@as(usize, 2), productions.items[0].rule[0].sym.group.items[0].sym.choice.items.len);
+}
+
+test "tokenize nested groups 2" {
+    const src =
+        \\X <- (A / (B / C))? D (E / F)
+    ;
+    var grammar = try g.Grammar.init(allr, fallr, src);
+    defer grammar.deinit(allr);
+
+    const productions = grammar.productions;
+    try t.expectEqual(@as(usize, 1), productions.items.len);
+    try t.expectEqual(@as(usize, 3), productions.items[0].rule.len);
+    try t.expectEqual(g.Symbol.Sym.Tag.group, productions.items[0].rule[0].sym);
+    try t.expectEqual(g.Symbol.Sym.Tag.token, productions.items[0].rule[1].sym);
+    try t.expectEqual(g.Symbol.Sym.Tag.group, productions.items[0].rule[2].sym);
+    try t.expectEqual(@as(usize, 1), productions.items[0].rule[0].sym.group.items.len);
+    try t.expectEqual(g.Symbol.Sym.Tag.choice, productions.items[0].rule[0].sym.group.items[0].sym);
+    try t.expectEqual(@as(usize, 2), productions.items[0].rule[0].sym.group.items[0].sym.choice.items.len);
+    try t.expectEqual(@as(usize, 1), productions.items[0].rule[0].sym.group.items[0].sym.choice.items[0].items.len);
+    try t.expectEqual(@as(usize, 1), productions.items[0].rule[0].sym.group.items[0].sym.choice.items[1].items.len);
+    try t.expectEqual(g.Symbol.Sym.Tag.group, productions.items[0].rule[0].sym.group.items[0].sym.choice.items[1].items[0].sym);
 }
 
 test "itemSymbolId" {
@@ -102,10 +147,10 @@ test "lr0 items" {
     var a = try g.lr0_automaton(allr, grammar);
     defer a.deinit(allr);
 
-    const states = a.transitions.items;
-    // std.debug.print("states {any}\n", .{g.Automaton.TransitionsFmt.init(a.transitions, grammar)});
+    const states = a.states.items;
+    // std.debug.print("states {any}\n", .{g.Automaton.TransitionsFmt.init(a.states, grammar)});
     try t.expectEqual(@as(usize, 6), states.len);
-    // std.debug.print("a.transitions count {any}\n", .{states.len});
+    // std.debug.print("a.states count {any}\n", .{states.len});
     try t.expectEqualStrings("S'", grammar.name(grammar.augprod.name.id).?);
     const Spid = grammar.name_ids.get("S'").?;
     const Sid = grammar.name_ids.get("S").?;
@@ -194,13 +239,13 @@ test "display productions" {
     const writer = l.writer();
     // for (grammar.productions.items) |p|
     try writer.print("{}", .{g.Production.Fmt.init(grammar.productions.items[0], grammar)});
-    try t.expectEqualStrings("S <- E ", l.items);
+    try t.expectEqualStrings("S <- E", l.items);
     l.items.len = 0;
     try writer.print("{}", .{g.Production.Fmt.init(grammar.productions.items[1], grammar)});
-    try t.expectEqualStrings("E <- E x E ", l.items);
+    try t.expectEqualStrings("E <- E x E", l.items);
     l.items.len = 0;
     try writer.print("{}", .{g.Production.Fmt.init(grammar.productions.items[2], grammar)});
-    try t.expectEqualStrings("E <- z ", l.items);
+    try t.expectEqualStrings("E <- z", l.items);
     l.items.len = 0;
 }
 

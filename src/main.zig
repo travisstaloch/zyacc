@@ -65,6 +65,7 @@ pub const SymbolListList = std.ArrayListUnmanaged(SymbolList);
 pub const Symbol = struct {
     flags: Flags = .{},
     sym: Sym,
+
     pub fn deinit(symbol: *Symbol, allocator: Allocator) void {
         switch (symbol.sym) {
             .group => |*list| {
@@ -80,6 +81,32 @@ pub const Symbol = struct {
             },
             else => {},
         }
+    }
+    pub fn dupe(symbol: Symbol, allocator: Allocator) Allocator.Error!Symbol {
+        return Symbol{
+            .flags = symbol.flags,
+            .sym = switch (symbol.sym) {
+                .group => |list| .{ .group = blk: {
+                    var g: SymbolList = .{};
+                    for (list.items) |it| try g.append(allocator, try it.dupe(allocator));
+                    break :blk g;
+                } },
+                .choice => |listlist| .{
+                    .choice = blk: {
+                        _ = listlist;
+                        var c: SymbolListList = .{};
+                        for (listlist.items) |list| {
+                            var l: SymbolList = .{};
+                            for (list.items) |it| try l.append(allocator, try it.dupe(allocator));
+                            try c.append(allocator, l);
+                        }
+                        // listlist.deinit(allocator);
+                        break :blk c;
+                    },
+                },
+                else => symbol.sym,
+            },
+        };
     }
     pub const Sym = union(enum) {
         token: Token,
@@ -104,21 +131,32 @@ pub const Symbol = struct {
         }
 
         pub fn format(self: Fmt, comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
+            if (self.symbol.flags.contains(.not)) _ = try writer.write("!");
             switch (self.symbol.sym) {
-                .token => |token| try writer.print("{}", .{Token.Fmt.init(token, self.g)}),
+                .token => |token| {
+                    try writer.print("{}", .{Token.Fmt.init(token, self.g)});
+                },
                 .group => |g| {
                     _ = try writer.write("(");
-                    for (g.items) |sym| try writer.print("{} ", .{Symbol.Fmt.init(sym, self.g)});
+                    for (g.items) |sym, i| {
+                        if (i != 0) _ = try writer.write(" ");
+                        try writer.print("{}", .{Symbol.Fmt.init(sym, self.g)});
+                    }
                     _ = try writer.write(")");
                 },
                 .choice => |cs| {
                     for (cs.items) |choice, i| {
-                        if (i != 0) _ = try writer.write(" /");
-                        for (choice.items) |sym|
-                            try writer.print("{} ", .{Symbol.Fmt.init(sym, self.g)});
+                        if (i != 0) _ = try writer.write(" / ");
+                        for (choice.items) |sym, j| {
+                            if (j != 0) _ = try writer.write(" ");
+                            try writer.print("{}", .{Symbol.Fmt.init(sym, self.g)});
+                        }
                     }
                 },
             }
+            if (self.symbol.flags.contains(.many)) _ = try writer.write("*");
+            if (self.symbol.flags.contains(.some)) _ = try writer.write("+");
+            if (self.symbol.flags.contains(.optional)) _ = try writer.write("?");
         }
     };
 };
@@ -207,11 +245,16 @@ pub const Grammar = struct {
         var result: Grammar = .{ .src = src };
         var ctx = Context.init(allr, fallr, src);
         var i: SymbolId = 0;
-        while (try ctx.nextProduction(&result)) |prods| : (i += 1) {
-            for (prods.items) |prod|
-                try result.productions.append(allr, prod);
+        var _arena = std.heap.ArenaAllocator.init(allr);
+        defer _arena.deinit();
+        const arena = _arena.allocator();
+
+        while (try ctx.nextProduction(&result, arena)) |*prods| : (i += 1) {
             if (prods.items.len > 0)
                 try result.nonterminals.putNoClobber(allr, prods.items[0].name.id, {});
+            for (prods.items) |prod| {
+                try result.productions.append(allr, try prod.dupe(allr));
+            }
         }
         // TODO: honor paren groupings
         // add augmented production at grammar.augprod and fixup its associated data using Automaton.augmented_id
@@ -221,10 +264,9 @@ pub const Grammar = struct {
             // trace("augsrc: {s}\n", .{augsrc});
             ctx.rest = result.buf;
             assert(ctx.mprodname == null);
-            var prods = (try ctx.nextProduction(&result)).?;
-            defer prods.deinit(allr);
+            var prods = (try ctx.nextProduction(&result, arena)).?;
             assert(prods.items.len == 1);
-            result.augprod = prods.items[0];
+            result.augprod = try prods.items[0].dupe(allr);
             // trace("name(augprod.name): {s}\n", .{result.name(result.augprod.name)});
             const aname = result.name(result.augprod.name.id).?;
             // replace given id with Automaton.augmented_id in 'name_ids' and 'id_names'
@@ -280,16 +322,16 @@ pub const Grammar = struct {
             //       if (!nullable[grammar.productions[i][j]])
             //         break;
             for (grammar.productions.items) |prod| {
-                const j = for (prod.rule.items) |item, j| {
+                const j = for (prod.rule) |item, j| {
                     if (!result.contains(item.sym.token.id))
                         break j;
-                } else prod.rule.items.len;
+                } else prod.rule.len;
 
                 // if (j == grammar.productions[i].length && !nullable[head]) {
                 //   nullable[head] = true;
                 //   added.push(head);
                 const head = prod.name.id;
-                if (j == prod.rule.items.len and !result.contains(head)) {
+                if (j == prod.rule.len and !result.contains(head)) {
                     try result.putNoClobber(allocator, head, {});
                     try added.put(allocator, head, {});
                 }
@@ -364,7 +406,7 @@ pub const Grammar = struct {
                     for (keys.keys()) |i| {
                         for (keys.keys()) |j| {
                             if (result.has(i, j) or (result.has(i, k) and result.has(k, j))) {
-                                var l = result.map.get(i) orelse unreachable;
+                                var l = result.map.get(i).?;
                                 try l.put(allocator, j, {});
                             }
                         }
@@ -394,7 +436,7 @@ pub const Grammar = struct {
                         const gop = try result.map.getOrPut(allocator, k);
                         if (!gop.found_existing) gop.value_ptr.* = .{};
                         const ls = ent.value_ptr.*;
-                        const immks = immediate.map.get(k) orelse unreachable;
+                        const immks = immediate.map.get(k).?;
                         for (ls.keys()) |l| {
                             try gop.value_ptr.put(allocator, l, immks.get(l) orelse continue);
                         }
@@ -415,7 +457,7 @@ pub const Grammar = struct {
                         if (!gop.found_existing) gop.value_ptr.* = .{};
                         const ts = ent.value_ptr.*;
                         for (ts.keys()) |t| {
-                            const us = immediate.map.get(t) orelse unreachable;
+                            const us = immediate.map.get(t).?;
                             for (us.keys()) |u| {
                                 try gop.value_ptr.put(allocator, u, {});
                             }
@@ -477,18 +519,18 @@ pub const Grammar = struct {
 
             // Skip nullable symbols...
 
-            const j = for (prod.rule.items) |item, j| {
+            const j = for (prod.rule) |item, j| {
                 if (!_nullable.contains(item.sym.token.id))
                     break j;
-            } else prod.rule.items.len;
+            } else prod.rule.len;
 
             // If the first non-nullable symbol is a terminal, add it to the immediate first set
             // of this nonterminal.
 
             // if (j < grammar.productions[i].length && !nonterminals[grammar.productions[i][j]])
             //   Relation.add(immediate, grammar.productions[i][0], grammar.productions[i][j]);
-            if (j < prod.rule.items.len) {
-                const item = prod.rule.items[j];
+            if (j < prod.rule.len) {
+                const item = prod.rule[j];
                 if (!grammar.isNonTerminal(item)) {
                     try immediate.add(allocator, prod.name.id, item.sym.token.id);
                 }
@@ -501,7 +543,7 @@ pub const Grammar = struct {
         // if it is also a nonterminal.
 
         for (grammar.productions.items) |prod| {
-            for (prod.rule.items) |item| {
+            for (prod.rule) |item| {
 
                 // Is it a nonterminal? Add it.
                 // if (nonterminals[grammar.productions[i][j]])
@@ -561,7 +603,7 @@ pub const Grammar = struct {
         // Given a production X -> ... A β, follow(A) includes first(β), except for the empty string.
 
         for (grammar.productions.items) |prod| {
-            for (prod.rule.items) |item, j| {
+            for (prod.rule) |item, j| {
 
                 // If the symbol is a nonterminal...
 
@@ -570,7 +612,7 @@ pub const Grammar = struct {
 
                     // Add the first set of the remaining symbols to the follow set of the symbol
 
-                    for (prod.rule.items[j + 1 ..]) |item2| {
+                    for (prod.rule[j + 1 ..]) |item2| {
 
                         // If this symbol is a terminal, add it, and then stop adding.
 
@@ -606,9 +648,9 @@ pub const Grammar = struct {
 
         for (grammar.productions.items) |prod| {
             // Scan from the end of the right side of the production to the beginning...
-            var j: usize = prod.rule.items.len - 1;
+            var j: usize = prod.rule.len - 1;
             while (true) : (j -= 1) {
-                const item = prod.rule.items[j];
+                const item = prod.rule[j];
 
                 // If the symbol is a nonterminal, add the left side.
 
@@ -664,12 +706,12 @@ pub const Grammar = struct {
         return if (isaug) blk: {
             break :blk if (item.pos == 0)
                 prod.name.id
-            else if (item.pos < prod.rule.items.len)
-                prod.rule.items[item.pos].sym.token.id
+            else if (item.pos < prod.rule.len)
+                prod.rule[item.pos].sym.token.id
             else
                 null;
-        } else if (item.pos < prod.rule.items.len)
-            prod.rule.items[item.pos].sym.token.id
+        } else if (item.pos < prod.rule.len)
+            prod.rule[item.pos].sym.token.id
         else
             null;
     }
@@ -680,13 +722,21 @@ pub const TokenListList = std.ArrayListUnmanaged(TokenList);
 
 pub const Production = struct {
     name: Token,
-    rule: SymbolList,
+    rule: []Symbol,
 
     pub fn deinit(prod: *Production, allocator: Allocator) void {
-        for (prod.rule.items) |*it| {
+        for (prod.rule) |*it| {
             it.deinit(allocator);
         }
-        prod.rule.deinit(allocator);
+        allocator.free(prod.rule);
+    }
+    pub fn dupe(prod: Production, allocator: Allocator) !Production {
+        var rule: SymbolList = .{};
+        for (prod.rule) |sym| try rule.append(allocator, try sym.dupe(allocator));
+        return Production{
+            .name = prod.name,
+            .rule = rule.toOwnedSlice(allocator),
+        };
     }
 
     pub const Fmt = struct {
@@ -697,8 +747,9 @@ pub const Production = struct {
         }
         pub fn format(self: Fmt, comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
             try writer.print("{s} <- ", .{self.g.name(self.p.name.id)});
-            for (self.p.rule.items) |sym| {
-                try writer.print("{} ", .{Symbol.Fmt.init(sym, self.g)});
+            for (self.p.rule) |sym, i| {
+                if (i != 0) _ = try writer.write(" ");
+                try writer.print("{}", .{Symbol.Fmt.init(sym, self.g)});
             }
         }
     };
@@ -861,21 +912,21 @@ pub const Context = struct {
         return null;
     }
 
-    fn splitRule(allocator: Allocator, tokens: []Symbol, comptime tag: Token.Tag) !SymbolListList {
-        var result = SymbolListList{};
+    fn splitRule(allocator: Allocator, symbols: []Symbol, comptime tag: Token.Tag) !std.ArrayListUnmanaged([]Symbol) {
+        var result: std.ArrayListUnmanaged([]Symbol) = .{};
         var i: usize = 0;
         const istag = struct {
-            fn func(tok: Symbol) bool {
-                return tok.sym == .token and tok.sym.token.tag == tag;
+            fn func(sym: Symbol) bool {
+                return sym.sym == .token and sym.sym.token.tag == tag;
             }
         }.func;
-        while (indexOfScalarPosFn(Symbol, tokens, i, istag)) |idx| {
-            trace("splitRule() {}/{}\n", .{ idx, tokens.len });
-            if (i < idx) try result.append(allocator, arrayListFrom(Symbol, tokens[i..idx]));
+        while (indexOfScalarPosFn(Symbol, symbols, i, istag)) |idx| {
+            trace("splitRule() {}/{}\n", .{ idx, symbols.len });
+            if (i < idx) try result.append(allocator, symbols[i..idx]);
             i = idx + 1;
         }
-        if (i < tokens.len)
-            try result.append(allocator, arrayListFrom(Symbol, tokens[i..]));
+        if (i < symbols.len)
+            try result.append(allocator, symbols[i..]);
         return result;
     }
 
@@ -887,7 +938,7 @@ pub const Context = struct {
     fn tokensToSymbols(allocator: Allocator, tokens: []Token, i: *usize, depth: usize) Error!SymbolList {
         // trace("tokensToSymbols tokens.len {}\n", .{tokens.len});
         var result: SymbolList = .{};
-
+        var foundnot: bool = false;
         while (i.* < tokens.len) : (i.* += 1) {
             const token = tokens[i.*];
             // trace("  tokensToSymbols token {}\n", .{token});
@@ -905,32 +956,39 @@ pub const Context = struct {
                     sym.flags.insert(.many)
                 else
                     return error.GrammarError,
-                .not => todo(),
+                .not => {
+                    foundnot = true;
+                    continue;
+                },
                 .group_end => return result,
                 .group => {
                     i.* += 1;
-                    const group = try tokensToSymbols(allocator, tokens, i, depth + 1);
-                    try result.append(allocator, .{ .sym = .{ .group = group } });
+                    var group = try tokensToSymbols(allocator, tokens, i, depth + 1);
+                    const choices = try splitRule(allocator, group.items, .choice);
+                    switch (choices.items.len) {
+                        0 => return error.GrammarError,
+                        1 => try result.append(allocator, .{ .sym = .{ .group = arrayListFrom(Symbol, choices.items[0]) } }),
+                        else => {
+                            var newgroup: Symbol = .{ .sym = .{ .group = .{} } };
+                            var newchoice: Symbol = .{ .sym = .{ .choice = .{} } };
+                            for (choices.items) |ch|
+                                try newchoice.sym.choice.append(allocator, arrayListFrom(Symbol, ch));
+                            try newgroup.sym.group.append(allocator, newchoice);
+                            try result.append(allocator, newgroup);
+                        },
+                    }
                     assert(tokens[i.*].tag == .group_end);
                 },
-                .choice => if (depth == 0)
-                    try result.append(allocator, .{ .sym = .{ .token = token } })
-                else {
-                    var choice = if (mprevsym != null and mprevsym.?.sym == .choice)
-                        mprevsym.?.sym.choice
-                    else
-                        SymbolListList{};
-                    try choice.append(allocator, result);
-                    result = .{};
-                    try result.append(allocator, .{ .sym = .{ .choice = choice } });
-                },
-                else => {
-                    var sink = if (mprevsym != null and mprevsym.?.sym == .choice)
-                        peekTop(SymbolList, mprevsym.?.sym.choice) orelse unreachable
-                    else
-                        &result;
-                    try sink.append(allocator, .{ .sym = .{ .token = token } });
-                },
+                // for choices, just append choice tokens.
+                // the rule will be split later either at group scope or top level
+                else => try result.append(allocator, .{ .sym = .{ .token = token } }),
+            }
+            if (foundnot) {
+                foundnot = false;
+                if (peekTop(Symbol, result)) |last|
+                    last.flags.insert(.not)
+                else
+                    return error.GrammarError;
             }
         }
         return result;
@@ -944,31 +1002,34 @@ pub const Context = struct {
     }
     pub const ProductionList = std.ArrayListUnmanaged(Production);
     pub fn parseChoice(allr: Allocator, tokens: []Token, prodname: Token) !ProductionList {
+        // defer allr.free(tokens);
         var i: usize = 0;
         var symbols = try tokensToSymbols(allr, tokens, &i, 0);
-        const rules = try splitRule(allr, symbols.toOwnedSlice(allr), .choice);
+        // trace("parseChoice symbols {any}\n", .{symbols.items});
+        // defer symbols.deinit(allr);
+        var rules = try splitRule(allr, symbols.items, .choice);
+        // defer rules.deinit(allr);
         var result: ProductionList = .{};
         for (rules.items) |rule| try result.append(allr, .{ .name = prodname, .rule = rule });
         return result;
     }
 
-    pub fn nextProduction(ctx: *Context, g: *Grammar) !?ProductionList {
+    pub fn nextProduction(ctx: *Context, g: *Grammar, arena: Allocator) !?ProductionList {
         var tokens = TokenList{};
-        // defer tokens.deinit(ctx.allr);
         while (try ctx.nextToken(g)) |tok| {
             // trace("tok {s}-{s}\n", .{ g.name(tok.id), @tagName(tok.tag) });
             if (tok.tag == ._name_arrow) {
                 defer ctx.mprodname = tok;
                 // trace("_name_arrow {s}-{s}\n", .{ g.name(tok), @tagName(tok.tag) });
                 if (ctx.mprodname) |prodname|
-                    return try parseChoice(ctx.allr, tokens.toOwnedSlice(ctx.allr), prodname);
-            } else try tokens.append(ctx.allr, tok);
+                    return try parseChoice(arena, tokens.items, prodname);
+            } else try tokens.append(arena, tok);
 
             // trace("{}-{s}\n", .{ g.Token.Fmt.init(tok, src), @tagName(tok.tag) });
         }
         if (ctx.mprodname) |prodname| {
             defer ctx.mprodname = null;
-            return try parseChoice(ctx.allr, tokens.toOwnedSlice(ctx.allr), prodname);
+            return try parseChoice(arena, tokens.items, prodname);
         }
         return null;
     }
@@ -976,27 +1037,27 @@ pub const Context = struct {
 pub const Automaton = struct {
     kernel: ItemSet,
     closure: ItemSet,
-    transitions: Transitions,
+    states: States,
 
     pub fn deinit(a: *Automaton, allocator: Allocator) void {
-        for (a.transitions.items) |*it| it.deinit(allocator);
-        a.transitions.deinit(allocator);
+        for (a.states.items) |*s| s.deinit(allocator);
+        a.states.deinit(allocator);
         a.kernel.deinit(allocator);
         a.closure.deinit(allocator);
     }
     // eql: EqlFn,
 
-    pub const Transitions = std.ArrayListUnmanaged(State);
+    pub const States = std.ArrayListUnmanaged(State);
     pub const TransitionsFmt = struct {
-        ts: Transitions,
+        ss: States,
         g: Grammar,
 
-        pub fn init(ts: Transitions, g: Grammar) TransitionsFmt {
-            return .{ .ts = ts, .g = g };
+        pub fn init(ss: States, g: Grammar) TransitionsFmt {
+            return .{ .ss = ss, .g = g };
         }
 
         pub fn format(self: TransitionsFmt, comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
-            for (self.ts.items) |state| {
+            for (self.ss.items) |state| {
                 try writer.print("{s}-{}-{any}", .{
                     ItemSetFmt.init(state.kernel, self.g),
                     ItemSetFmt.init(state.items, self.g),
@@ -1006,26 +1067,26 @@ pub const Automaton = struct {
         }
     };
     pub fn init(allocator: Allocator, grammar: Grammar, build: Build) Error!Automaton {
-        var result: Automaton = .{ .kernel = .{}, .closure = .{}, .transitions = .{} };
+        var result: Automaton = .{ .kernel = .{}, .closure = .{}, .states = .{} };
 
         var initkernel = try itemSetFromItems(allocator, build.initial);
         trace("init() kernel.count {}\n", .{initkernel.count()});
-        try result.transitions.append(allocator, .{ .kernel = initkernel, .items = .{}, .transitions = .{} });
+        try result.states.append(allocator, .{ .kernel = initkernel, .items = .{}, .transitions = .{} });
 
         var s: StateId = 0;
-        while (s < result.transitions.items.len) {
-            var l = result.transitions.items.len;
+        while (s < result.states.items.len) {
+            var l = result.states.items.len;
             while (s < l) : (s += 1) {
                 // NOTE: '&' here is very important so that the changes in this block are saved.
                 // without it, we are just modifying a copy :^)
-                var state = &result.transitions.items[s];
+                var state = &result.states.items[s];
 
                 // Find the closure of the state's kernel
+                state.items.deinit(allocator);
                 state.items = try build.closure(result, allocator, grammar, state.kernel);
                 // defer state.items.deinit(allocator);
 
                 // Find the transitions out of the state (a map from symbol to kernel)
-
                 var transitions = try build.transitions(result, allocator, grammar, state.items);
                 defer {
                     // for (transitions.values()) |*v| v.deinit(allocator);
@@ -1033,6 +1094,7 @@ pub const Automaton = struct {
                 }
 
                 trace("init() transitions.count {}\n", .{transitions.count()});
+
                 state.transitions.deinit(allocator);
                 state.transitions = .{};
                 // defer state.transitions.deinit(allocator);
@@ -1046,17 +1108,17 @@ pub const Automaton = struct {
 
                     var kernel = transitions.get(symbol).?;
                     var i: usize = 0;
-                    while (i < result.transitions.items.len) : (i += 1) {
-                        // for (result.transitions.items) |transition| {
-                        if (build.eql(result.transitions.items[i].kernel, kernel)) {
+                    while (i < result.states.items.len) : (i += 1) {
+                        // for (result.states.items) |transition| {
+                        if (build.eql(result.states.items[i].kernel, kernel)) {
                             try state.transitions.put(allocator, symbol, @intCast(StateId, i));
                             break;
                         }
                     }
 
-                    if (i == result.transitions.items.len) {
-                        try state.transitions.put(allocator, symbol, @intCast(StateId, result.transitions.items.len));
-                        try result.transitions.append(allocator, .{ .kernel = kernel, .items = .{}, .transitions = .{} });
+                    if (i == result.states.items.len) {
+                        try state.transitions.put(allocator, symbol, @intCast(StateId, result.states.items.len));
+                        try result.states.append(allocator, .{ .kernel = kernel, .items = .{}, .transitions = .{} });
                     }
                 }
             }
@@ -1249,11 +1311,11 @@ pub fn slr1Table(allocator: Allocator, grammar: Grammar) !Table {
 
     var a = try lr0_automaton(allocator, grammar);
     defer a.deinit(allocator);
-    trace("slr1Table a.transitions.len {}\n", .{a.transitions.items.len});
+    trace("slr1Table a.states.len {}\n", .{a.states.items.len});
     var follows = try grammar.follow(allocator);
     defer follows.deinit(allocator);
 
-    for (a.transitions.items) |state, i| {
+    for (a.states.items) |state, i| {
         trace("  {}\n", .{i});
         var actions: Actions = .{};
 
@@ -1287,7 +1349,7 @@ pub fn slr1Table(allocator: Allocator, grammar: Grammar) !Table {
                 // }
 
                 const prod = grammar.productions.items[item.id];
-                if (item.pos == prod.rule.items.len) {
+                if (item.pos == prod.rule.len) {
                     if (follows.map.get(prod.name.id)) |ss| {
                         for (ss.keys()) |s| {
                             try addReduceAction(allocator, &actions, s, item.id);
@@ -1319,16 +1381,15 @@ fn addReduceAction(allocator: Allocator, actions: *Actions, symbol: SymbolId, id
 }
 
 pub fn tableFree(allocator: Allocator, table: *Table) void {
-    for (table.items) |*i| i.deinit(allocator);
+    for (table.items) |*actions| {
+        for (actions.values()) |*action| action.reduce.deinit(allocator);
+        actions.deinit(allocator);
+    }
     table.deinit(allocator);
 }
 pub fn parseSlr1Table(allocator: Allocator, fallr: Allocator, rows: []const u8, grammar: Grammar) !Table {
-    _ = grammar;
-    _ = fallr;
-    _ = allocator;
     var table: Table = .{};
     var linesit = std.mem.split(u8, rows, "\n");
-    // var row: u8 = 0;
     while (linesit.next()) |line| {
         var it = std.mem.split(u8, line, ",");
         while (it.next()) |_ent| {
