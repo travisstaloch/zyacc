@@ -161,18 +161,6 @@ pub const Symbol = struct {
     };
 };
 
-pub const State = struct {
-    kernel: ItemSet,
-    items: ItemSet,
-    transitions: std.AutoArrayHashMapUnmanaged(StateId, StateId),
-
-    fn deinit(s: *State, allocator: Allocator) void {
-        s.kernel.deinit(allocator);
-        s.items.deinit(allocator);
-        s.transitions.deinit(allocator);
-    }
-};
-
 pub const ItemSet = std.AutoArrayHashMapUnmanaged(Item, void);
 pub const ItemSetSet = std.AutoArrayHashMapUnmanaged(SymbolId, ItemSet);
 pub fn itemSetFromItems(allocator: Allocator, items: []const Item) !ItemSet {
@@ -221,16 +209,6 @@ pub const Item = struct {
 
 pub const SymbolId = u16;
 pub const SymbolIdList = std.ArrayListUnmanaged(SymbolId);
-pub const StateId = u16;
-
-pub const LR1Table = struct {
-    pub const Entry = struct {
-        id: SymbolId,
-        row: StateId,
-        shift: SymbolId,
-        reduce: []const SymbolId,
-    };
-};
 
 pub const Grammar = struct {
     productions: std.ArrayListUnmanaged(Production) = .{},
@@ -352,10 +330,10 @@ pub const Grammar = struct {
             }
             pub fn add(relation: *Self, allocator: Allocator, s: T, t: T) !void {
                 // relation[s] = relation[s] || {};
+                // relation[s][t] = true;
                 const gop = try relation.map.getOrPut(allocator, s);
                 if (!gop.found_existing) gop.value_ptr.* = .{};
                 try gop.value_ptr.put(allocator, t, {});
-                // relation[s][t] = true;
             }
 
             pub fn has(relation: Self, i: T, j: T) bool {
@@ -378,14 +356,20 @@ pub const Grammar = struct {
                 //     keys[j] = true;
                 //     result[i] = result[i] || {};
                 //     result[i][j] = relation[i][j];
-                for (relation.map.keys()) |i| {
-                    try keys.put(allocator, i, {});
-                    const js = relation.map.get(i) orelse continue;
-                    for (js.keys()) |j| {
-                        try keys.put(allocator, j, {});
+                {
+                    var iter = relation.map.iterator();
+                    while (iter.next()) |it| {
+                        const i = it.key_ptr.*;
+                        const js = it.value_ptr.*;
+                        // for (relation.map.keys()) |i| {
+                        try keys.put(allocator, i, {});
+                        //     const js = relation.map.get(i) orelse continue;
                         const gop = try result.map.getOrPut(allocator, i);
                         if (!gop.found_existing) gop.value_ptr.* = .{};
-                        try gop.value_ptr.put(allocator, j, {});
+                        for (js.keys()) |j| {
+                            try keys.put(allocator, j, {});
+                            try gop.value_ptr.put(allocator, j, {});
+                        }
                     }
                 }
 
@@ -406,8 +390,10 @@ pub const Grammar = struct {
                     for (keys.keys()) |i| {
                         for (keys.keys()) |j| {
                             if (result.has(i, j) or (result.has(i, k) and result.has(k, j))) {
-                                var l = result.map.get(i).?;
-                                try l.put(allocator, j, {});
+                                // var l = result.map.getPtr(i).?;
+                                const gop = try result.map.getOrPut(allocator, i);
+                                if (!gop.found_existing) gop.value_ptr.* = .{};
+                                try gop.value_ptr.put(allocator, j, {});
                             }
                         }
                     }
@@ -430,15 +416,14 @@ pub const Grammar = struct {
                 //     result[k] = result[k] || {};
                 //     result[k][l] = immediate[k][l];
                 {
-                    var it = immediate.map.iterator();
-                    while (it.next()) |ent| {
-                        const k = ent.key_ptr.*;
+                    var iter = immediate.map.iterator();
+                    while (iter.next()) |it| {
+                        const k = it.key_ptr.*;
                         const gop = try result.map.getOrPut(allocator, k);
                         if (!gop.found_existing) gop.value_ptr.* = .{};
-                        const ls = ent.value_ptr.*;
-                        const immks = immediate.map.get(k).?;
+                        const ls = it.value_ptr.*;
                         for (ls.keys()) |l| {
-                            try gop.value_ptr.put(allocator, l, immks.get(l) orelse continue);
+                            try gop.value_ptr.put(allocator, l, {});
                         }
                     }
                 }
@@ -450,14 +435,14 @@ pub const Grammar = struct {
                 //       result[s] = result[s] || {};
                 //       result[s][u] = immediate[t][u];
                 {
-                    var it = closed.map.iterator();
-                    while (it.next()) |ent| {
-                        const s = ent.key_ptr.*;
+                    var iter = closed.map.iterator();
+                    while (iter.next()) |it| {
+                        const s = it.key_ptr.*;
                         const gop = try result.map.getOrPut(allocator, s);
                         if (!gop.found_existing) gop.value_ptr.* = .{};
-                        const ts = ent.value_ptr.*;
+                        const ts = it.value_ptr.*;
                         for (ts.keys()) |t| {
-                            const us = immediate.map.get(t).?;
+                            const us = immediate.map.get(t) orelse continue;
                             for (us.keys()) |u| {
                                 try gop.value_ptr.put(allocator, u, {});
                             }
@@ -484,13 +469,17 @@ pub const Grammar = struct {
                 }
 
                 pub fn format(self: Fmt, comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
-                    var it = self.r.map.iterator();
-                    while (it.next()) |ent| {
-                        const k = ent.key_ptr.*;
-                        try writer.print("{s}-{}: ", .{ self.g.name(k), k });
-                        for (ent.value_ptr.*.keys()) |v| {
-                            try writer.print("{s}-{}, ", .{ self.g.name(v), v });
+                    var iter = self.r.map.iterator();
+                    var i: usize = 0;
+                    while (iter.next()) |it| : (i += 1) {
+                        const k = it.key_ptr.*;
+                        if (i != 0) _ = try writer.write(", ");
+                        try writer.print("{s}: {{", .{self.g.name(k)});
+                        for (it.value_ptr.*.keys()) |v, j| {
+                            if (j != 0) _ = try writer.write(", ");
+                            try writer.print("{s}", .{self.g.name(v)});
                         }
+                        _ = try writer.write("}");
                     }
                 }
             };
@@ -582,6 +571,7 @@ pub const Grammar = struct {
     pub const END = Automaton.end;
 
     pub fn follow(grammar: Grammar, allocator: Allocator) !Relation(SymbolId) {
+        // trace("follow \n", .{});
         var firsts = try grammar.first(allocator);
         defer firsts.map.deinit(allocator);
         var _nullable = try grammar.nullable(allocator);
@@ -644,6 +634,8 @@ pub const Grammar = struct {
                 }
             }
         }
+
+        trace("follow1 immediate {any} propagation {any}\n", .{ immediate.fmt(grammar), propagation.fmt(grammar) });
         // Given a production B -> ... A β where β is nullable or is the empty string, follow(A) includes follow(B)
 
         for (grammar.productions.items) |prod| {
@@ -662,15 +654,18 @@ pub const Grammar = struct {
 
                 // if (!nullable[grammar.productions[i][j]])
                 //   break;
-                if (!_nullable.contains(item.sym.token.id) or j == 0)
+                if (j == 0 or !_nullable.contains(item.sym.token.id))
                     break;
             }
         }
+
+        trace("follow2 immediate {any} propagation {any}\n", .{ immediate.fmt(grammar), propagation.fmt(grammar) });
 
         // Propagate the relation
 
         // var result = Relation.propagate(immediate, propagation);
         var result = try immediate.propagate(allocator, propagation);
+        trace("follow3 result {any}\n", .{result.fmt(grammar)});
 
         // Ensure that all nonterminals are present as keys, even if that particular follow set is empty.
 
@@ -678,8 +673,8 @@ pub const Grammar = struct {
         //   if (typeof result[k] === "undefined")
         //     result[k] = {};
         // }
-        for (grammar.nonterminals.keys()) |ntid| {
-            const gop = try result.map.getOrPut(allocator, ntid);
+        for (grammar.nonterminals.keys()) |k| {
+            const gop = try result.map.getOrPut(allocator, k);
             if (!gop.found_existing) gop.value_ptr.* = .{};
         }
 
@@ -688,6 +683,7 @@ pub const Grammar = struct {
 
     // account for item.id == augmented_id by using the start symbol name
     pub fn itemSymbolId(grammar: Grammar, item: Item, _start: Production) ?SymbolId {
+
         // If the production is the augmented start production, we're looking
         // for the original start symbol. Otherwise, use the grammar's productions
         // to find the symbol, but add one to account for the left-hand side of
@@ -702,18 +698,16 @@ pub const Grammar = struct {
             _start
         else
             grammar.productions.items[item.id];
-
-        return if (isaug) blk: {
+        const result: ?SymbolId = if (isaug) blk: {
             break :blk if (item.pos == 0)
                 prod.name.id
-            else if (item.pos < prod.rule.len)
-                prod.rule[item.pos].sym.token.id
             else
                 null;
         } else if (item.pos < prod.rule.len)
             prod.rule[item.pos].sym.token.id
         else
             null;
+        return result;
     }
 };
 
@@ -837,6 +831,17 @@ pub const p = struct {
         };
     }
 };
+
+pub fn peekTopPtr(comptime T: type, list: std.ArrayListUnmanaged(T)) ?*T {
+    return if (list.items.len == 0) null else &list.items[list.items.len - 1];
+}
+pub fn peekTop(comptime T: type, list: std.ArrayListUnmanaged(T)) ?T {
+    return if (list.items.len == 0) null else list.items[list.items.len - 1];
+}
+pub fn peekAt(comptime T: type, list: std.ArrayListUnmanaged(T), index: usize) ?*T {
+    return if (index >= list.items.len) null else &list.items[index];
+}
+
 pub const SymbolNamesMap = std.StringArrayHashMapUnmanaged(SymbolId);
 pub const NameSymbolsMap = std.AutoArrayHashMapUnmanaged(SymbolId, []const u8);
 pub const Context = struct {
@@ -844,8 +849,8 @@ pub const Context = struct {
     /// dummy failing allocator for mecha parsers which don't do any allocations
     fallr: Allocator,
     rest: []const u8,
-    /// prodname is be stored so that when a new 'name <-' is found,
-    /// this previous one gets applied to all tokens between
+    /// mprodname is cached so that when a new 'name <-' is encountered,
+    /// the cached one gets applied to tokens found between
     mprodname: ?Token = null,
 
     pub fn eof(self: Context) bool {
@@ -930,10 +935,6 @@ pub const Context = struct {
         return result;
     }
 
-    fn peekTop(comptime T: type, list: std.ArrayListUnmanaged(T)) ?*T {
-        return if (list.items.len == 0) null else &list.items[list.items.len - 1];
-    }
-
     pub const Error = error{GrammarError} || mem.Allocator.Error;
     fn tokensToSymbols(allocator: Allocator, tokens: []Token, i: *usize, depth: usize) Error!SymbolList {
         // trace("tokensToSymbols tokens.len {}\n", .{tokens.len});
@@ -942,7 +943,7 @@ pub const Context = struct {
         while (i.* < tokens.len) : (i.* += 1) {
             const token = tokens[i.*];
             // trace("  tokensToSymbols token {}\n", .{token});
-            const mprevsym = peekTop(Symbol, result);
+            const mprevsym = peekTopPtr(Symbol, result);
             switch (token.tag) {
                 .optional => if (mprevsym) |sym|
                     sym.flags.insert(.optional)
@@ -985,7 +986,7 @@ pub const Context = struct {
             }
             if (foundnot) {
                 foundnot = false;
-                if (peekTop(Symbol, result)) |last|
+                if (peekTopPtr(Symbol, result)) |last|
                     last.flags.insert(.not)
                 else
                     return error.GrammarError;
@@ -1034,20 +1035,34 @@ pub const Context = struct {
         return null;
     }
 };
+
+pub const StateId = u16;
+pub const States = std.ArrayListUnmanaged(State);
+pub const State = struct {
+    kernel: ItemSet = .{},
+    itemset: ItemSet = .{},
+    transitions: std.AutoArrayHashMapUnmanaged(SymbolId, StateId) = .{},
+
+    fn deinit(s: *State, allocator: Allocator) void {
+        s.kernel.deinit(allocator);
+        s.itemset.deinit(allocator);
+        s.transitions.deinit(allocator);
+    }
+};
+
 pub const Automaton = struct {
-    kernel: ItemSet,
-    closure: ItemSet,
-    states: States,
+    // kernel: ItemSet = .{},
+    // closure: ItemSet = .{},
+    states: States = .{},
 
     pub fn deinit(a: *Automaton, allocator: Allocator) void {
         for (a.states.items) |*s| s.deinit(allocator);
         a.states.deinit(allocator);
-        a.kernel.deinit(allocator);
-        a.closure.deinit(allocator);
+        // a.kernel.deinit(allocator);
+        // a.closure.deinit(allocator);
     }
     // eql: EqlFn,
 
-    pub const States = std.ArrayListUnmanaged(State);
     pub const TransitionsFmt = struct {
         ss: States,
         g: Grammar,
@@ -1060,70 +1075,75 @@ pub const Automaton = struct {
             for (self.ss.items) |state| {
                 try writer.print("{s}-{}-{any}", .{
                     ItemSetFmt.init(state.kernel, self.g),
-                    ItemSetFmt.init(state.items, self.g),
+                    ItemSetFmt.init(state.itemset, self.g),
                     state.transitions.keys(),
                 });
             }
         }
     };
     pub fn init(allocator: Allocator, grammar: Grammar, build: Build) Error!Automaton {
-        var result: Automaton = .{ .kernel = .{}, .closure = .{}, .states = .{} };
+        var states: States = .{};
 
         var initkernel = try itemSetFromItems(allocator, build.initial);
         trace("init() kernel.count {}\n", .{initkernel.count()});
-        try result.states.append(allocator, .{ .kernel = initkernel, .items = .{}, .transitions = .{} });
+        try states.append(allocator, .{ .kernel = initkernel });
 
         var s: StateId = 0;
-        while (s < result.states.items.len) {
-            var l = result.states.items.len;
-            while (s < l) : (s += 1) {
-                // NOTE: '&' here is very important so that the changes in this block are saved.
-                // without it, we are just modifying a copy :^)
-                var state = &result.states.items[s];
+        while (s < states.items.len) {
+            while (s < states.items.len) : (s += 1) {
+
+                // NOTE: this section is tricky and can produce segfaults.
+                //   this is why 'states.items[s]' is repeated rather than making an alias.
+                //   making an pointer alias seemed to work, but then on
+                //   a slightly larger grammar, there were segfaults below where
+                //   states.items[s].transitions.put() is called.  not sure why this is happening...
 
                 // Find the closure of the state's kernel
-                state.items.deinit(allocator);
-                state.items = try build.closure(result, allocator, grammar, state.kernel);
-                // defer state.items.deinit(allocator);
+                states.items[s].itemset = try build.closure(allocator, grammar, states.items[s].kernel);
 
                 // Find the transitions out of the state (a map from symbol to kernel)
-                var transitions = try build.transitions(result, allocator, grammar, state.items);
-                defer {
-                    // for (transitions.values()) |*v| v.deinit(allocator);
-                    transitions.deinit(allocator);
-                }
+                const transitions = try build.transitions(allocator, grammar, states.items[s].itemset);
 
-                trace("init() transitions.count {}\n", .{transitions.count()});
-
-                state.transitions.deinit(allocator);
-                state.transitions = .{};
-                // defer state.transitions.deinit(allocator);
-
-                for (transitions.keys()) |symbol| {
-
+                states.items[s].transitions.clearRetainingCapacity();
+                var iter = transitions.iterator();
+                while (iter.next()) |it| {
+                    const symbol = it.key_ptr.*;
+                    const kernel = it.value_ptr.*;
+                    // trace("symbol '{s}'\n", .{grammar.name(symbol)});
                     // Given a symbol and kernel in the transition map, find out if we've
                     // already added the kernel as a state. If we have, assign that state's
                     // index to the transition table for the symbol. If not, create a
                     // new state.
 
-                    var kernel = transitions.get(symbol).?;
+                    // const kernel = transitions.get(symbol).?;
                     var i: usize = 0;
-                    while (i < result.states.items.len) : (i += 1) {
-                        // for (result.states.items) |transition| {
-                        if (build.eql(result.states.items[i].kernel, kernel)) {
-                            try state.transitions.put(allocator, symbol, @intCast(StateId, i));
+                    while (i < states.items.len) : (i += 1) {
+                        const state = states.items[i];
+                        const eql1 = build.eql(state.kernel, kernel);
+                        const eql2 = lr0Same2(state.kernel, kernel);
+                        assert(eql1 == eql2);
+
+                        if (eql1) {
+                            trace("state.transitions.put {s}-{}\n", .{ grammar.name(symbol), i });
+                            try states.items[s].transitions.put(allocator, symbol, @intCast(StateId, i));
                             break;
                         }
                     }
 
-                    if (i == result.states.items.len) {
-                        try state.transitions.put(allocator, symbol, @intCast(StateId, result.states.items.len));
-                        try result.states.append(allocator, .{ .kernel = kernel, .items = .{}, .transitions = .{} });
+                    if (i == states.items.len) {
+                        trace("kernel.length {} state.transitions.put {s}-{}\n", .{ kernel.count(), grammar.name(symbol), states.items.len });
+                        try states.items[s].transitions.put(allocator, symbol, @intCast(StateId, states.items.len));
+                        try states.append(allocator, .{ .kernel = kernel });
                     }
                 }
+                trace(
+                    // "init() states.items.len {} s {} state.itemset {} transitions.count {} state.transitions.count {}\n",
+                    "{} {} {} {} {}\n",
+                    .{ states.items.len, s, states.items[s].itemset.count(), transitions.count(), states.items[s].transitions.count() },
+                );
             }
         }
-        return result;
+        return Automaton{ .states = states };
     }
 
     pub const Build = struct {
@@ -1135,12 +1155,12 @@ pub const Automaton = struct {
 
     pub const Error = error{} || mem.Allocator.Error;
     pub const GrammarFn = fn (Allocator, Grammar) Error!Automaton;
-    pub const ClosureFn = fn (Automaton, Allocator, Grammar, ItemSet) Error!ItemSet;
-    pub const TransitionsFn = fn (Automaton, Allocator, Grammar, ItemSet) Error!ItemSetSet;
+    pub const ClosureFn = fn (Allocator, Grammar, ItemSet) Error!ItemSet;
+    pub const TransitionsFn = fn (Allocator, Grammar, ItemSet) Error!ItemSetSet;
     pub const EqlFn = fn (ItemSet, ItemSet) bool;
 
-    pub fn lr0Closure(_: Automaton, allocator: Allocator, grammar: Grammar, kernel: ItemSet) Error!ItemSet {
-        trace("lr0Closure kernel.count {}\n", .{kernel.count()});
+    pub fn lr0Closure(allocator: Allocator, grammar: Grammar, kernel: ItemSet) Error!ItemSet {
+        trace("lr0Closure kernel.count {} kernel {}\n", .{ kernel.count(), ItemSetFmt.init(kernel, grammar) });
 
         const start = grammar.start();
 
@@ -1154,7 +1174,7 @@ pub const Automaton = struct {
         var result: ItemSet = .{};
 
         for (kernel.keys()) |it| {
-            trace("{}\n", .{it});
+            // trace("{}\n", .{it});
             try result.put(allocator, it, {});
         }
 
@@ -1167,11 +1187,11 @@ pub const Automaton = struct {
             // For each item we have...
 
             for (result.keys()) |item| {
-                // trace("item {}\n", .{item});
-                // Find the nonterminal symbol...
-
-                trace("item {}\n", .{item});
                 const msymbolid = grammar.itemSymbolId(item, start);
+                const symname: []const u8 = if (msymbolid) |sid| grammar.name(sid).? else "null";
+                trace("symbol {s} item {}\n", .{ symname, item });
+
+                // Find the nonterminal symbol...
 
                 // Find unused matching productions and add them.
 
@@ -1183,6 +1203,7 @@ pub const Automaton = struct {
                     for (grammar.productions.items) |prod, _j| {
                         const j = @intCast(SymbolId, _j);
                         if (!used.contains(j) and prod.name.id == symbolid) {
+                            trace("adding {}-{s}\n", .{ j, grammar.name(j) });
                             try added.put(allocator, .{ .id = j, .pos = 0 }, {});
                             try used.put(allocator, j, {});
                         }
@@ -1191,16 +1212,15 @@ pub const Automaton = struct {
             }
 
             for (added.keys()) |add| try result.put(allocator, add, {});
-            trace("added count {} result count {}\n", .{ added.count(), result.count() });
+            // trace("added count {} result count {}\n", .{ added.count(), result.count() });
             if (added.count() == 0) break;
         }
-
+        trace("lr0Closure result.length {}\n", .{result.count()});
         return result;
     }
 
-    pub fn lr0Transitions(a: Automaton, allocator: Allocator, grammar: Grammar, closure: ItemSet) Error!ItemSetSet {
+    pub fn lr0Transitions(allocator: Allocator, grammar: Grammar, closure: ItemSet) Error!ItemSetSet {
         trace("lr0Transitions closure.count() {}\n", .{closure.count()});
-        _ = a;
         const start = grammar.start();
         var result: ItemSetSet = .{};
 
@@ -1213,7 +1233,7 @@ pub const Automaton = struct {
             // TODO: account for non-token syms and flags
 
             const msymbolid = grammar.itemSymbolId(item, start);
-            trace("msymbolid {}\n", .{msymbolid});
+            // trace("msymbolid {}\n", .{msymbolid});
 
             if (msymbolid) |symbolid| {
                 const gop = try result.getOrPut(allocator, symbolid);
@@ -1221,13 +1241,28 @@ pub const Automaton = struct {
                 try gop.value_ptr.put(allocator, .{ .id = item.id, .pos = item.pos + 1 }, {});
             }
         }
-
+        trace("lr0Transitions result.length {}\n", .{result.count()});
         return result;
     }
     fn lr0Same(a: ItemSet, b: ItemSet) bool {
         return a.count() == b.count() and for (a.keys()) |it| {
             if (!b.contains(it)) break false;
         } else true;
+    }
+    fn lr0Same2(a: ItemSet, b: ItemSet) bool {
+        // Are the two kernels equal?
+        if (a.count() != b.count())
+            return false;
+        for (a.keys()) |ait| {
+            var j: usize = 0;
+            while (j < b.count()) : (j += 1) {
+                const bit = b.keys()[j];
+                if (ait.id == bit.id and ait.pos == bit.pos) break;
+            }
+            if (j == b.count())
+                return false;
+        }
+        return true;
     }
     pub const augmented_id = std.math.maxInt(SymbolId);
     pub const accept = augmented_id - 1;
@@ -1262,7 +1297,7 @@ pub const Action = struct {
         const shiftsnulleql = (a.shift == null) == (b.shift == null);
         const shiftseql = (shiftsnulleql and
             (a.shift == null or a.shift.? == b.shift.?));
-        trace("shifts eql {} {} {}\n", .{ shiftseql, a.shift, b.shift });
+        // trace("shifts eql {} {} {}\n", .{ shiftseql, a.shift, b.shift });
         return shiftseql and
             a.reduce.items.len == b.reduce.items.len and
             blk: {
@@ -1289,20 +1324,24 @@ pub const TableFmt = struct {
     pub fn format(self: TableFmt, comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
         try writer.print("table.len {}\n", .{self.t.items.len});
         for (self.t.items) |acts, i| {
-            var it = acts.iterator();
-            while (it.next()) |ent| {
-                const id = ent.key_ptr.*;
-                const act = ent.value_ptr.*;
-                try writer.print("{}-{s}: ", .{ i, self.g.name(id) });
+            var iter = acts.iterator();
+            var j: usize = 0;
+            while (iter.next()) |it| : (j += 1) {
+                if (j != 0) _ = try writer.write(", ");
+                const id = it.key_ptr.*;
+                const act = it.value_ptr.*;
+                try writer.print("{}-{s}-", .{ i, self.g.name(id) });
                 if (act.shift) |s|
-                    try writer.print(" .shift={} ", .{s});
+                    try writer.print("s{}", .{s});
                 if (act.reduce.items.len > 0) {
-                    try writer.print(" .reduce=", .{});
-                    for (act.reduce.items) |r|
-                        try writer.print("{}, ", .{r});
+                    try writer.print("r", .{});
+                    for (act.reduce.items) |r, k| {
+                        if (k != 0) _ = try writer.write(", ");
+                        try writer.print("{}", .{r});
+                    }
                 }
-                _ = try writer.write("\n");
             }
+            _ = try writer.write("\n");
         }
     }
 };
@@ -1315,31 +1354,33 @@ pub fn slr1Table(allocator: Allocator, grammar: Grammar) !Table {
     var follows = try grammar.follow(allocator);
     defer follows.deinit(allocator);
 
+    trace("automaton.states.len {}\n", .{a.states.items.len});
     for (a.states.items) |state, i| {
-        trace("  {}\n", .{i});
+        // trace("  {}\n", .{i});
         var actions: Actions = .{};
-
+        trace("state.transitions.len {} state.items.len {}\n", .{ state.transitions.count(), state.itemset.count() });
         // for (s in state.transitions)
         //   actions[s] = { shift: state.transitions[s] };
-        var it = state.transitions.iterator();
-        while (it.next()) |ent| {
-            const s = ent.key_ptr.*;
-            const shift = ent.value_ptr.*;
-            trace("  state.transition {},{}\n", .{ s, shift });
+        var iter = state.transitions.iterator();
+        while (iter.next()) |it| {
+            const s = it.key_ptr.*;
+            const shift = it.value_ptr.*;
+            // trace("  state.transition {},{}\n", .{ s, shift });
             try actions.putNoClobber(allocator, s, .{ .shift = shift });
         }
 
-        for (state.items.keys()) |item| {
-            trace("  state.item {}\n", .{item});
+        for (state.itemset.keys()) |item| {
+            // trace("  state.item {}\n", .{item});
 
             // if (item.production === -1) {
             if (item.id == Automaton.augmented_id) {
 
                 // if (item.index === 1)
                 //   addReduceAction(actions, Grammar.END, item.production);
-                trace("  augmented_id pos {}\n", .{item.pos});
+                // trace("  augmented_id pos {}\n", .{item.pos});
 
-                if (item.pos == 1) // NOTE: i have no idea why this is necessary
+                // This is necessary because the second row (1 index) $ gets a special accept state
+                if (item.pos == 1)
                     try addReduceAction(allocator, &actions, Grammar.END, item.id);
             } else {
 
@@ -1355,6 +1396,9 @@ pub fn slr1Table(allocator: Allocator, grammar: Grammar) !Table {
                             try addReduceAction(allocator, &actions, s, item.id);
                         }
                     }
+                } else {
+                    // trace("WARNING: didn't add item {}-{}\n", .{ i, item });
+                    _ = i;
                 }
             }
         }
@@ -1391,11 +1435,11 @@ pub fn parseSlr1Table(allocator: Allocator, fallr: Allocator, rows: []const u8, 
     var table: Table = .{};
     var linesit = std.mem.split(u8, rows, "\n");
     while (linesit.next()) |line| {
-        var it = std.mem.split(u8, line, ",");
-        while (it.next()) |_ent| {
-            const ent = mem.trim(u8, _ent, &std.ascii.spaces);
-            trace("ent '{s}'\n", .{ent});
-            if (ent.len == 0) continue;
+        var iter = std.mem.split(u8, line, ",");
+        while (iter.next()) |_it| {
+            const it = mem.trim(u8, _it, &std.ascii.spaces);
+            // trace("it '{s}'\n", .{it});
+            if (it.len == 0) continue;
             const parser = comptime m.combine(.{
                 p.somedigits,
                 p.char('-'),
@@ -1406,13 +1450,13 @@ pub fn parseSlr1Table(allocator: Allocator, fallr: Allocator, rows: []const u8, 
             var rowname: []const u8 = undefined;
             var colname: []const u8 = undefined;
             var val: []const u8 = undefined;
-            if (ent.len == 0) continue;
-            if (parser(fallr, ent)) |r| {
+            if (it.len == 0) continue;
+            if (parser(fallr, it)) |r| {
                 rowname = r.value[0];
                 colname = r.value[2];
                 val = r.value[4];
             } else |_| {}
-            trace("rowname '{s}' colname '{s}' val '{s}'\n", .{ rowname, colname, val });
+            // trace("rowname '{s}' colname '{s}' val '{s}'\n", .{ rowname, colname, val });
             const row = try std.fmt.parseInt(StateId, rowname, 10);
             const colid = grammar.name_ids.get(colname).?;
             const isterm = !grammar.nonterminals.contains(colid);
@@ -1424,7 +1468,7 @@ pub fn parseSlr1Table(allocator: Allocator, fallr: Allocator, rows: []const u8, 
             assert(row + 1 <= table.items.len);
             var action: Action = .{};
             if (isterm) {
-                trace("term '{s}' val '{s}'\n", .{ ent, val });
+                // trace("term '{s}' val '{s}'\n", .{ it, val });
                 if (val[0] == 's')
                     action.shift = try std.fmt.parseInt(StateId, val[1..], 10)
                 else if (val[0] == 'r') // r0
@@ -1445,19 +1489,28 @@ pub fn parseSlr1Table(allocator: Allocator, fallr: Allocator, rows: []const u8, 
 }
 pub fn tablesEql(expected: Table, actual: Table) bool {
     for (expected.items) |exrow, i| {
-        const missingidx = for (exrow.keys()) |exk, j| {
-            if (i >= actual.items.len or !actual.items[i].contains(exk) or
-                !containsval: {
-                break :containsval for (actual.items[i].values()) |bv| {
+        // this loops over all the expected keys and makes sure they are present in actual
+        // also making sure each of the key's values are present and in same order
+        //   FIXME: make Table.reduce into a set instead of a list to remove this same ordering requirement
+        // missingidx is used for debugging
+        const missingidx = for (exrow.keys()) |exkey, j| {
+            if (i >= actual.items.len or
+                !actual.items[i].contains(exkey) or
+                !blk: {
+                break :blk for (actual.items[i].values()) |bv| {
                     if (bv.eql(exrow.values()[j])) break true;
                 } else false;
             }) break j;
         } else null;
-        if (missingidx) |idx|
+
+        if (missingidx) |idx| {
+            const actk = if (idx < actual.items[i].keys().len) actual.items[i].keys()[idx] else null;
+            const actv = if (idx < actual.items[i].values().len) actual.items[i].values()[idx] else null;
             trace(
-                "FAILURE: action missing in row {} \n  expected keys {} actual keys {} \n  expected values {} \n  actual values   {}\n",
-                .{ i, exrow.keys()[idx], actual.items[i].keys()[idx], exrow.values()[idx], actual.items[i].values()[idx] },
+                "FAILURE: action missing in row {} \n  expected col {} actual col {} \n  expected values {} \n  actual values   {}\n",
+                .{ i, exrow.keys()[idx], actk, exrow.values()[idx], actv },
             );
+        }
         if (missingidx != null) return false;
     }
     return true;

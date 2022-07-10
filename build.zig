@@ -13,9 +13,10 @@ pub fn build(b: *std.build.Builder) void {
     const main_tests = b.addTest("src/tests.zig");
     pkgs.addAllTo(main_tests);
     main_tests.setBuildMode(mode);
+    // main_tests.linkLibC();
 
     var filter: []const u8 = "";
-    // filter = "tokenize zig";
+    // filter = "slr1Table factor";
     main_tests.filter = filter;
 
     const test_step = b.step("test", "Run library tests");

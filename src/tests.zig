@@ -6,6 +6,7 @@ const t = std.testing;
 const fallr = t.failing_allocator;
 var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
 const allr = arena.allocator();
+// const allr = std.heap.c_allocator;
 
 test "tokenize" {
     // const src = @embedFile("../samples/zig.grammar");
@@ -110,14 +111,12 @@ test "tokenize nested groups 2" {
     try t.expectEqual(g.Symbol.Sym.Tag.group, productions.items[0].rule[0].sym.group.items[0].sym.choice.items[1].items[0].sym);
 }
 
+fn expectItemSymId(expected_id: ?g.SymbolId, id: g.SymbolId, pos: g.SymbolId, start: g.Production, grammar: g.Grammar) !void {
+    const msym = grammar.itemSymbolId(g.Item.init(id, pos), start);
+    try t.expectEqual(expected_id, msym);
+}
 test "itemSymbolId" {
     const src = @embedFile("../samples/xz.bnf");
-    const expectItemSymId = struct {
-        fn func(expected_id: ?g.SymbolId, id: g.SymbolId, pos: g.SymbolId, start: g.Production, grammar: g.Grammar) !void {
-            const msym = grammar.itemSymbolId(g.Item.init(id, pos), start);
-            try t.expectEqual(expected_id, msym);
-        }
-    }.func;
     var grammar = try g.Grammar.init(allr, fallr, src);
     defer grammar.deinit(allr);
     const start = grammar.start();
@@ -137,6 +136,44 @@ test "itemSymbolId" {
     try expectItemSymId(null, 2, 1, start, grammar);
 }
 
+test "itemSymbolId2" {
+    const src = @embedFile("../samples/factor.bnf");
+    var grammar = try g.Grammar.init(allr, fallr, src);
+    defer grammar.deinit(allr);
+    const start = grammar.start();
+    // this table was created from item_pos_sym in grammophone/application.js
+    // console.log(JSON.stringify(item_pos_sym))
+    // the rows are input/output {Item, ?SymbolId}
+
+    const input_output_pairs = [_]std.meta.Tuple(&.{ g.Item, ?g.SymbolId }){
+        .{ g.Item.init(g.Automaton.augmented_id, 0), grammar.name_ids.get("E").? },
+        .{ g.Item.init(0, 0), grammar.name_ids.get("E").? },
+        .{ g.Item.init(1, 0), grammar.name_ids.get("T").? },
+        .{ g.Item.init(2, 0), grammar.name_ids.get("T").? },
+        .{ g.Item.init(3, 0), grammar.name_ids.get("F").? },
+        .{ g.Item.init(4, 0), grammar.name_ids.get("(").? },
+        .{ g.Item.init(5, 0), grammar.name_ids.get("id").? },
+        .{ g.Item.init(g.Automaton.augmented_id, 1), null },
+        .{ g.Item.init(0, 1), grammar.name_ids.get("+").? },
+        .{ g.Item.init(1, 1), null },
+        .{ g.Item.init(2, 1), grammar.name_ids.get("*").? },
+        .{ g.Item.init(3, 1), null },
+        .{ g.Item.init(4, 1), grammar.name_ids.get("E").? },
+        .{ g.Item.init(5, 1), null },
+        .{ g.Item.init(0, 2), grammar.name_ids.get("T").? },
+        .{ g.Item.init(2, 2), grammar.name_ids.get("F").? },
+        .{ g.Item.init(4, 2), grammar.name_ids.get(")").? },
+        .{ g.Item.init(0, 3), null },
+        .{ g.Item.init(2, 3), null },
+        .{ g.Item.init(4, 3), null },
+    };
+    for (input_output_pairs) |ex| {
+        const item = ex[0];
+        const expected_sym = ex[1];
+        try expectItemSymId(expected_sym, item.id, item.pos, start, grammar);
+    }
+}
+
 test "lr0 items" {
     const src = @embedFile("../samples/xz.bnf");
     var grammar = try g.Grammar.init(allr, fallr, src);
@@ -148,9 +185,7 @@ test "lr0 items" {
     defer a.deinit(allr);
 
     const states = a.states.items;
-    // std.debug.print("states {any}\n", .{g.Automaton.TransitionsFmt.init(a.states, grammar)});
     try t.expectEqual(@as(usize, 6), states.len);
-    // std.debug.print("a.states count {any}\n", .{states.len});
     try t.expectEqualStrings("S'", grammar.name(grammar.augprod.name.id).?);
     const Spid = grammar.name_ids.get("S'").?;
     const Sid = grammar.name_ids.get("S").?;
@@ -255,7 +290,6 @@ test "slr1Table" {
     defer grammar.deinit(allr);
     var table = try g.slr1Table(allr, grammar);
     defer g.tableFree(allr, &table);
-    // std.debug.print("table {}\n", .{g.TableFmt.init(table, grammar)});
     const tablesrc =
         \\0-S-s1, 0-E-s2, 0-z-s3, 
         \\1-$-$accept, 
@@ -268,4 +302,88 @@ test "slr1Table" {
     defer g.tableFree(allr, &extable);
     try t.expectEqual(@as(usize, 6), extable.items.len);
     try t.expect(g.tablesEql(extable, table));
+}
+
+test "slr1Table factor" {
+    const src = @embedFile("../samples/factor.bnf");
+    var grammar = try g.Grammar.init(allr, fallr, src);
+    defer grammar.deinit(allr);
+    try t.expectEqual(@as(usize, 6), grammar.productions.items.len);
+    try t.expectEqual(@as(usize, 3), grammar.nonterminals.count());
+    try t.expectEqual(@as(usize, 11), grammar.name_ids.count());
+    try t.expectEqual(@as(usize, 11), grammar.id_names.count());
+    // var a = try g.lr0_automaton(allr, grammar);
+    // const expectedlens = [_][2]usize{ .{ 5, 7 }, .{ 1, 2 }, .{ 0, 1 }, .{ 5, 7 }, .{ 0, 1 }, .{ 4, 5 }, .{ 3, 3 }, .{ 2, 2 }, .{ 1, 2 }, .{ 0, 1 } };
+    // for (expectedlens) |lens, i| {
+    //     const tslenex = lens[0];
+    //     const islenex = lens[1];
+    //     const tslenact = a.states.items[i].transitions.count();
+    //     const islenact = a.states.items[i].itemset.count();
+    //     if (tslenex != tslenact)
+    //         std.debug.print("WARNING: states[{}].transitions.count() {} != {} \n", .{ i, tslenact, tslenex });
+    //     // try t.expectEqual(tslenex, tslenact);
+
+    //     if (islenex != islenact)
+    //         std.debug.print("WARNING: states[{}].itemset.count() {} != {} \n", .{ i, islenact, islenex });
+    //     // try t.expectEqual(islenex, islenact);
+    // }
+    var table = try g.slr1Table(allr, grammar);
+    defer g.tableFree(allr, &table);
+    // std.debug.print("table {}\n", .{g.TableFmt.init(table, grammar)});
+    const extablesrc =
+        \\0-E-s1, 0-T-s2, 0-F-s3, 0-'('-s4, 0-"id"-s5, 
+        \\1-'+'-s6, 1-$-$accept, 
+        \\2-'*'-s7, 2-$-r1, 2-'+'-r1, 2-')'-r1, 
+        \\3-'*'-r3, 3-$-r3, 3-'+'-r3, 3-')'-r3, 
+        \\4-E-s8, 4-T-s2, 4-F-s3, 4-'('-s4, 4-"id"-s5, 
+        \\5-'*'-r5, 5-$-r5, 5-'+'-r5, 5-')'-r5, 
+        \\6-T-s9, 6-F-s3, 6-'('-s4, 6-"id"-s5, 
+        \\7-F-s10, 7-'('-s4, 7-"id"-s5, 
+        \\8-')'-s11, 8-'+'-s6, 
+        \\9-'*'-s7, 9-$-r0, 9-'+'-r0, 9-')'-r0, 
+        \\10-'*'-r2, 10-$-r2, 10-'+'-r2, 10-')'-r2, 
+        \\11-'*'-r4, 11-$-r4, 11-'+'-r4, 11-')'-r4, 
+    ;
+    var extable = try g.parseSlr1Table(allr, t.failing_allocator, extablesrc, grammar);
+    defer g.tableFree(allr, &extable);
+    try t.expectEqual(@as(usize, 12), extable.items.len);
+
+    try t.expect(g.tablesEql(extable, table));
+}
+
+test "slr1Table parser" {
+    const src = @embedFile("../samples/factor.bnf");
+    var grammar = try g.Grammar.init(allr, fallr, src);
+    defer grammar.deinit(allr);
+    var table = try g.slr1Table(allr, grammar);
+    defer g.tableFree(allr, &table);
+    // std.debug.print("table {}\n", .{g.TableFmt.init(table, grammar)});
+    const inputs =
+        \\id * id + id
+    ;
+    var inputit = std.mem.split(u8, inputs, "\n");
+    var stack = std.ArrayListUnmanaged(g.StateId){};
+    while (inputit.next()) |line| {
+        stack.items.len = 0;
+        try stack.append(allr, 0);
+        var tokit = std.mem.split(u8, line, " ");
+        var a = tokit.next();
+        while (true) {
+            const symid = grammar.name_ids.get(a orelse return error.NoInput) orelse return error.InvalidSymbol;
+            const s = g.peekTop(g.StateId, stack) orelse return error.EmptyStack;
+            std.debug.print("symid {} s {}\n", .{ symid, s });
+            if (g.peekAt(g.Actions, table, s)) |actions| {
+                if (actions.get(symid)) |action| {
+                    if (action.shift) |shift| {
+                        std.debug.print("shift {}\n", .{shift});
+                        try stack.append(allr, shift);
+                        a = tokit.next();
+                    } else if (action.reduce.items.len > 0) {
+                        std.debug.print("{any}\n", .{action.reduce.items});
+                        return error.NotImplemented;
+                    }
+                } else return error.ErrorRecovery;
+            } else return error.ErrorRecovery;
+        }
+    }
 }
