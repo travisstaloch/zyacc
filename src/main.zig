@@ -238,8 +238,17 @@ pub const Grammar = struct {
         // add augmented production at grammar.augprod and fixup its associated data using Automaton.augmented_id
         if (result.productions.items.len > 0) {
             const startname = result.id_names.get(result.start().name.id).?;
-            result.buf = try std.fmt.allocPrint(allr, "{s}' <- {s}", .{ startname, startname });
-            // trace("augsrc: {s}\n", .{augsrc});
+            var buf = std.ArrayList(u8).init(allr);
+            defer buf.deinit();
+            const writer = buf.writer();
+            try writer.print("{s}'", .{startname});
+            while (result.name_ids.get(buf.items) != null) {
+                _ = try writer.write("'");
+            }
+            try writer.print(" <- {s}", .{startname});
+            result.buf = buf.toOwnedSlice();
+
+            trace("augmented: {s}\n", .{result.buf});
             ctx.rest = result.buf;
             assert(ctx.mprodname == null);
             var prods = (try ctx.nextProduction(&result, arena)).?;
@@ -747,6 +756,9 @@ pub const Production = struct {
             }
         }
     };
+    pub fn fmt(prod: Production, g: Grammar) Fmt {
+        return .{ .p = prod, .g = g };
+    }
 };
 
 // const showtrace = true;
@@ -779,7 +791,7 @@ pub const p = struct {
     pub const ws = m.discard(m.many(m.ascii.space, .{ .collect = false }));
     pub const somenonws = m.discard(m.many(m.ascii.not(m.ascii.space), .{ .collect = false, .min = 1 }));
 
-    pub const ident = m.asStr(m.combine(.{ m.ascii.alpha, manyalphanum, m.opt(char('\'')) }));
+    pub const ident = m.asStr(m.combine(.{ m.ascii.alpha, manyalphanum, m.many((char('\'')), .{ .collect = false }) }));
     pub const _larrow = m.string("<-");
     pub const larrow = m.discard(_larrow);
     pub const _many_non_larrow = m.many(m.ascii.not(larrow), .{ .collect = false });
@@ -1514,4 +1526,82 @@ pub fn tablesEql(expected: Table, actual: Table) bool {
         if (missingidx != null) return false;
     }
     return true;
+}
+
+const PeekIter = struct {
+    iter: std.mem.SplitIterator(u8),
+    cached: ?[]const u8 = null,
+
+    fn peek(self: *PeekIter) ?[]const u8 {
+        return if (self.cached) |s| s else blk: {
+            self.cached = self.iter.next();
+            break :blk self.cached;
+        };
+    }
+    fn next(self: *PeekIter) ?[]const u8 {
+        return if (self.cached) |s| blk: {
+            defer self.cached = null;
+            break :blk s;
+        } else self.iter.next();
+    }
+};
+
+pub fn tableParseInput(allocator: Allocator, table: Table, input: []const u8, grammar: Grammar) !void {
+    // adapted from https://github.com/ayushkumarshah/SLR-Parser/blob/master/main.py:388
+    var stack: std.ArrayListUnmanaged(SymbolId) = .{};
+    defer {
+        stack.deinit(allocator);
+    }
+    try stack.append(allocator, 0);
+    var peekit = PeekIter{ .iter = std.mem.split(u8, input, " ") };
+    var id: usize = 0;
+    while (true) : (id += 1) {
+        if (id > 15) break;
+        const curr_symbol = peekit.peek() orelse "$";
+        const curr_symbol_id = grammar.name_ids.get(curr_symbol) orelse
+            return error.ParseError;
+        const top_stack = peekTop(SymbolId, stack) orelse
+            return error.ParseError;
+        if (top_stack == Automaton.accept) break;
+        const get_action = table.items[top_stack].get(curr_symbol_id);
+        {
+            trace("{}: {s}-{} top_stack {} stack ", .{ id, curr_symbol, curr_symbol_id, top_stack });
+            if (stack.items.len > 0) trace("{}, ", .{stack.items[0]});
+            var i: usize = 1;
+            while (i < stack.items.len) : (i += 2)
+                trace("{s}-{}, ", .{ grammar.id_names.get(stack.items[i]), stack.items[i + 1] });
+        }
+        trace("\n", .{});
+        if (get_action) |action| {
+            if (action.shift) |shift| {
+                trace("shift {}\n", .{shift});
+                try stack.append(allocator, curr_symbol_id);
+                try stack.append(allocator, shift);
+                _ = peekit.next() orelse
+                    return error.ParseError;
+            }
+            if (action.reduce.items.len > 0) {
+                assert(action.reduce.items.len == 1);
+                const r = action.reduce.items[0];
+                const prod = if (r == Automaton.augmented_id)
+                    grammar.augprod
+                else
+                    grammar.productions.items[r];
+                trace("reduce prod {} r {}. TODO: output production\n", .{ prod.fmt(grammar), r });
+                const rule = prod.rule;
+                var i: usize = 0;
+                while (i < 2 * rule.len) : (i += 1)
+                    _ = stack.popOrNull() orelse return error.ParseError;
+                const state = peekTop(SymbolId, stack) orelse
+                    return error.ParseError;
+                try stack.append(allocator, prod.name.id);
+                const x = if (prod.name.id == Automaton.augmented_id)
+                    Action{ .shift = Automaton.accept }
+                else
+                    table.items[state].get(prod.name.id) orelse
+                        return error.ParseError;
+                try stack.append(allocator, x.shift.?);
+            }
+        } else return error.ParseError;
+    }
 }

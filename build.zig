@@ -16,7 +16,7 @@ pub fn build(b: *std.build.Builder) void {
     // main_tests.linkLibC();
 
     var filter: []const u8 = "";
-    // filter = "slr1Table factor";
+    // filter = "slr1Table parser";
     main_tests.filter = filter;
 
     const test_step = b.step("test", "Run library tests");
